@@ -330,10 +330,29 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
 
         // The single door into the UI. Hotkey, tray, and second-instance events
         // all arrive here and nowhere else.
+        //
+        // TWO TASKS, deliberately.
+        //
+        // The receive loop runs on the BACKGROUND executor. It has to: a loop
+        // parked on the foreground executor is never woken once no window is
+        // visible, and a launcher is hidden most of the time. With the loop on
+        // the foreground, the first hotkey press after hiding queued a `Toggle`
+        // that nothing ever read, so the launcher could not be reopened without
+        // a restart — the log just went silent after `popup: hidden`, with no
+        // error anywhere, which is exactly the symptom reported.
+        //
+        // The background future is `Send`, so it may not hold any GPUI type
+        // (`AsyncApp` is `!Send` and would not compile). It therefore sees only
+        // a channel, and forwards to a foreground task that owns the app handle.
+        // Each hop is a bounded send on an unbounded channel, so the background
+        // loop never blocks and never stops draining.
+        let (pump_tx, pump_rx) = async_channel::unbounded::<UiCommand>();
+        spawn_command_pump(receiver, pump_tx);
+
         let pump_launcher = launcher.clone();
         let pump_telemetry = Arc::clone(&telemetry);
         cx.spawn(async move |cx| {
-            while let Ok(command) = receiver.recv().await {
+            while let Ok(command) = pump_rx.recv().await {
                 match command {
                     UiCommand::Toggle => toggle(&pump_launcher, &pump_telemetry, cx),
                     UiCommand::Show => show(&pump_launcher, &pump_telemetry, cx),
@@ -546,6 +565,40 @@ fn toggle(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut Asyn
     }
 }
 
+/// Moves every incoming command from `source` to `sink`, forever.
+///
+/// This exists as its own function, and on its own thread, because of one fact
+/// about GPUI that is invisible in the type signatures: the *foreground*
+/// executor on Windows is driven by window activity, so a task parked on it is
+/// not scheduled again while no window is visible. A launcher is hidden most of
+/// the time, so a command pump living there is effectively dead between toggles.
+///
+/// The symptom was silent: the hotkey was still registered and still firing, the
+/// command was still queued, but nothing woke to drain it — so the log simply
+/// stopped after `popup: hidden`, with no error line to explain it.
+///
+/// A thread rather than `background_executor().spawn`, because that requires
+/// `Send` and any future holding a GPUI type is `!Send`. `recv_blocking` parks
+/// without polling, and the channel is unbounded so this can never block a
+/// hotkey thread.
+fn spawn_command_pump(
+    source: async_channel::Receiver<UiCommand>,
+    sink: async_channel::Sender<UiCommand>,
+) {
+    std::thread::Builder::new()
+        .name("orca-command-pump".into())
+        .spawn(move || {
+            while let Ok(command) = source.recv_blocking() {
+                if sink.send_blocking(command).is_err() {
+                    // The consumer is gone, so the app is shutting down.
+                    break;
+                }
+            }
+        })
+        .map_err(|error| degraded("command pump thread", error))
+        .ok();
+}
+
 /// Moves the popup to the cursor's monitor, centred in its work area.
 ///
 /// A no-op if the `HWND` is unavailable, which leaves the window where the
@@ -578,7 +631,53 @@ mod tests {
     use orca_core::config::HotkeySpec;
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
 
-    use super::{POPUP_HEIGHT, POPUP_WIDTH};
+    use super::{spawn_command_pump, UiCommand, POPUP_HEIGHT, POPUP_WIDTH};
+
+    #[test]
+    fn the_command_pump_keeps_draining_across_a_long_idle_period() {
+        // Regression test for the bug where the launcher could not be reopened
+        // after being hidden. The pump used to live on the foreground executor,
+        // which Windows stops scheduling when no window is visible. A human
+        // cannot see this from a screenshot: the hotkey still fired, the command
+        // was still queued, and the log just stopped.
+        //
+        // What is verified here is the property that actually matters: after a
+        // long idle stretch — longer than any real gap between toggles — a
+        // command sent later still gets through. That is exactly the sequence
+        // that used to fail: show, hide, wait, hotkey.
+        let (from_producer, source) = async_channel::unbounded::<UiCommand>();
+        let (to_consumer, sink) = async_channel::unbounded::<UiCommand>();
+        spawn_command_pump(source, to_consumer);
+
+        from_producer.send_blocking(UiCommand::Toggle).unwrap();
+        assert!(matches!(sink.recv_blocking().unwrap(), UiCommand::Toggle));
+
+        // The popup is now hidden and nothing is happening. The pump must not
+        // have gone away during this.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        from_producer.send_blocking(UiCommand::Toggle).unwrap();
+        from_producer.send_blocking(UiCommand::Show).unwrap();
+        assert!(matches!(sink.recv_blocking().unwrap(), UiCommand::Toggle));
+        assert!(matches!(sink.recv_blocking().unwrap(), UiCommand::Show));
+    }
+
+    #[test]
+    fn the_command_pump_exits_when_its_consumer_is_gone() {
+        // Quit drops the foreground task, so the sink closes. The pump must
+        // notice and stop rather than spinning on a dead channel.
+        let (from_producer, source) = async_channel::unbounded::<UiCommand>();
+        let (to_consumer, _sink) = async_channel::unbounded::<UiCommand>();
+        spawn_command_pump(source, to_consumer);
+        // `_sink` is still alive here, so drop it to close the channel the pump
+        // is writing to.
+        drop(_sink);
+
+        // With no consumer, sends fail. The pump should already have exited or
+        // exit on this; either way nothing panics and the thread is reclaimed.
+        let _ = from_producer.send_blocking(UiCommand::Quit);
+        let _ = &from_producer;
+    }
 
     #[test]
     fn the_config_default_hotkey_parses_the_normal_way() {

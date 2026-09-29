@@ -381,6 +381,47 @@ non-empty marked range, because the IME replaces its own marked text through
 `replace_text_in_range` and deleting as well would remove two characters for
 one keypress.
 
+## GPUI's foreground executor stops when no window is visible
+
+This is the single most expensive thing learned in this project, and the only
+one that produced a bug with **no error message at all**.
+
+`Context::spawn` runs its future on the *foreground* executor. On Windows that
+executor is driven by window activity, and when no window is visible it stops
+scheduling. A future parked on it is therefore not merely slow to wake — it is
+not woken.
+
+A launcher is hidden nearly all the time, so "a task that only runs while the
+popup is open" is a contradiction. Orca had its command pump there: hotkey
+presses were funnelled into an `async_channel` and drained by a `cx.spawn` loop.
+The loop waited on `recv()`.
+
+The reported symptom was that the launcher could not be reopened after pressing
+Esc. The log ended at `popup: hidden (window retained)` and nothing more was
+ever printed. That silence is the diagnostic signature:
+
+* The hotkey was still registered and still firing.
+* The command was still being queued, correctly.
+* Nothing was draining it, because the executor holding the drain loop was
+  asleep and the popup was the thing that would have woken it.
+
+Two toggles appeared to work, which is what made it confusing: the first show
+put a visible window up, which kept the executor awake long enough to handle the
+next press. The failure only appeared once a hide was followed by a real pause.
+
+The fix is a two-task shape. A dedicated thread parks on `recv_blocking` and
+forwards to the foreground task over a second channel. The receive loop is
+therefore never subject to window visibility, and each command still reaches the
+app on the correct thread.
+
+Note this could not be solved with `background_executor().spawn`: that requires
+a `Send` future, and any future holding a GPUI type is `!Send`, because
+`AsyncApp` is. A thread has no such bound, which is why the pump is a thread.
+
+**The general rule:** anything that must run while the app is *idle* — tray
+polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
+live on the foreground executor. It is not a slow path, it is a dead one.
+
 ## Decisions
 
 **Workspace `resolver = "2"`, edition 2021.** Resolver 2 is required to be

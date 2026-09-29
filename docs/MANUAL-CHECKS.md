@@ -41,27 +41,52 @@ the popup, that is a bug.
 
 ## 1. The retained window — the highest-risk thing in this change
 
-The popup window is created **once** and then hidden with `ShowWindow(SW_HIDE)`.
-It is never recreated. Everything else in the app is secondary to this working,
-because the whole design rests on it and because it is the one thing a test
-cannot reach.
+### 1a. Reopening after Esc — REGRESSED, then fixed. Please re-check this one first
 
-**There is a specific bug this fixed, and you are the only one who can confirm
-the fix.** <kbd>Esc</kbd> and <kbd>Enter</kbd> used to call
+**This failed on the first human run.** Reported as: *"launched with the hotkey,
+pressed escape, and wasn't able to reopen with the hotkey."*
+
+The cause was not the retained window and not the hotkey. Both were fine. The bug
+was that the command pump — the task that drains hotkey presses into the UI —
+was parked on GPUI's **foreground** executor, which on Windows stops scheduling
+when no window is visible. A launcher is hidden most of the time, so after
+<kbd>Esc</kbd> the pump was never woken again. The hotkey kept firing and the
+command kept queueing; nothing read it.
+
+The tell was in the log: it stopped dead at `popup: hidden (window retained)`
+with no error line, and no third `popup: shown`. Two toggles had worked, which
+made it look intermittent — the first show put a window up, which kept the
+executor awake long enough for the next press.
+
+Fixed by moving the pump onto a dedicated thread. Please confirm:
+
+1. Start the launcher, press <kbd>Ctrl+Alt+Space</kbd>. Popup appears.
+2. Press <kbd>Esc</kbd>.
+3. **Wait a few seconds** — a pause is what triggered the original failure.
+4. Press <kbd>Ctrl+Alt+Space</kbd> again. The popup must reappear.
+5. Repeat steps 2–4 at least ten times, with a pause at step 3 each time.
+6. **Expected:** a `popup: shown` / `popup: hidden` pair per toggle, and the
+   process never exits.
+7. If it ever goes quiet, the log's *last* line tells you which half broke:
+   `hidden` means the press was not drained, `shown` means the show itself
+   failed.
+
+### 1b. Esc hides without killing the launcher
+
+There is a second, older bug in the same area, fixed earlier and worth keeping an
+eye on. <kbd>Esc</kbd> and <kbd>Enter</kbd> used to call
 `Window::remove_window()`, which destroys the window. The process survived (that
 is `QuitMode::Explicit`) but `main` still held a `WindowHandle` and an `HWND` for
 a window that no longer existed, so every later toggle was a silent no-op and the
 launcher was dead until you restarted it. Both paths now go through one
 `Launcher::hide`, which returns a decision instead of destroying anything.
 
-### 1a. Esc hides without killing the launcher — the regression
-
 1. Start the launcher. Wait for `ready: resident…`. No window is on screen; this
    is correct.
 2. Press <kbd>Ctrl+Alt+Space</kbd>. The popup appears and takes focus.
 3. Press <kbd>Esc</kbd>.
-4. **Expected:** the popup disappears, the process is still running, and
-   `run.log` gained exactly one line: `popup: hidden (window retained)`.
+4. **Expected:** the popup disappears, the process is still running, and the log
+   gained exactly one line: `popup: hidden (window retained)`.
 
    If instead you see `popup: hidden (window destroyed; no HWND was available)`,
    the retained path is not in use and the latency win is gone. That is a
