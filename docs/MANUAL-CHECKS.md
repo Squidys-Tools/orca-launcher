@@ -14,6 +14,32 @@ optional stress runs but the judgement calls below stay human.
 cargo run -p orca --target x86_64-pc-windows-gnu
 ```
 
+## Ranking feel (once the UI collects real results)
+
+The ranking policy is unit-tested and green, but every weight in it is a product
+judgement that has never been judged by a person looking at a list. These need a
+human, because "is this ordering right" is not a property a test can assert.
+
+- [ ] Type the first two letters of an app's name. Does the right app come first,
+      before the files and folders that also match?
+- [ ] Type a word that appears in a *folder name* (`downloads`). Do the folders
+      come above the files whose names merely contain the letters?
+- [ ] Launch something three times, then reopen with an empty query. Is it in the
+      recents, near the top?
+- [ ] Launch something once, wait a week, and type its name. Does a *more* used
+      but staler item still outrank the one you just wanted? (This is the
+      frecency trade being deliberate — confirm it feels right rather than wrong.)
+- [ ] Type a deliberate typo. Does a sensible result appear at the *bottom* of
+      the list, and is it obviously not what you typed?
+- [ ] Type a query that matches nothing. Is the list empty rather than showing
+      everything faintly?
+- [ ] Press <kbd>Esc</kbd> and reopen, and re-derive the same query. Do the rows
+      land in the same order? (Determinism; a reshuffle under the cursor is a bug.)
+
+No network, no display, and no real profile is needed for any of the above to be
+a valid manual check — but a real machine with a real file tree is the only place
+the source weights have ever been exercised.
+
 ## First run of the probe
 
 | # | Check | How | Expected |

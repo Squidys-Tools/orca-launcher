@@ -56,14 +56,61 @@ allowed to know that Windows exists. It is not allowed to know about GPUI.
 Enforcement is mechanical, not cultural. The check is:
 
 ```powershell
-cargo tree -p orca-core --target x86_64-pc-windows-gnu
+cargo tree -p orca-core --edges normal --target x86_64-pc-windows-gnu
 ```
 
-The output must contain exactly one line: `orca-core`. If it grows a `gpui`, a
-`windows-sys`, or anything else, the rule has been broken. This is the check to
-put in CI when CI exists — it is four lines of `cargo metadata` piping, and it is
-the reason the dependency lists in `crates/orca-core/Cargo.toml` and
-`crates/orca-win/Cargo.toml` carry a comment saying not to edit them.
+The output must contain exactly one root, `orca-core`, and nothing that can
+reach a window or a Win32 call. This is the check to put in CI when CI exists.
+
+**`--edges normal` is load-bearing, and getting it wrong is a false alarm.**
+`cargo tree` includes dev-dependencies by default, and the benchmark dependency
+(`criterion`) transitively pulls in `winapi` and `windows-sys`. That is harmless
+— a benchmark binary is not shipped, and nothing in it is on the ranking path —
+but a plain `cargo tree -p orca-core` will show them and look like a violation.
+`--edges normal` is what actually links into the library.
+
+Note also that build-dependencies (`cc`, `vcpkg`, `pkg-config`, reached through
+`libsqlite3-sys`) appear in the normal-edge tree. They compile the bundled
+SQLite amalgamation and are not linked into the binary, so they do not count
+against the rule either.
+
+The list in `crates/orca-core/Cargo.toml` currently holds `serde`, `toml`,
+`rusqlite` (with `bundled`, so there is no system SQLite to install), and
+`criterion` as a dev-dependency. None of them can reach a window or a Win32 call,
+which is the property being protected. Do not add to it without reading this
+file.
+
+## Where the "pure" rule actually bites
+
+Layering rule 2 says *no clock, no filesystem, no environment, no global state*.
+That is stricter than "no gpui, no Win32", and it is the rule that costs
+something. Each forbidden thing is replaced by a seam rather than by an
+exception:
+
+| Forbidden | Replaced by | Where the caller lives |
+|---|---|---|
+| clock | `frecency::Timestamp`, passed in | `orca` |
+| filesystem | `config::ConfigPaths`, `providers::DirectoryLister` | `orca` |
+| environment | an injected `(name, value)` list | `orca` |
+| persistence | the `store::UsageStore` trait | `orca`, via `store::sqlite` |
+| globals | nothing; every function is free | — |
+
+The one place `orca-core` does read the environment is
+`config::ConfigPaths::default()`, which resolves `%APPDATA%`. It is behind
+`Default` rather than behind any function the tests call, so a test that uses
+`ConfigPaths::at` or `ConfigPaths::under_app_data` never touches it.
+
+**`std::fs`-backed file search lives outside this crate, deliberately.**
+`providers::FileSearchProvider` is a bounded directory walk — depth limit, cycle
+guard, result cap, id derivation, mtime-to-prior — over an injected
+`DirectoryLister`. `providers::InMemoryDirectory` is a complete implementation,
+so the traversal is tested against fixtures containing a junction loop, a
+permission denial, and a 200-level tree, none of which a real filesystem makes
+cheap to produce. The `std::fs` adapter is a dozen lines and belongs to `orca`,
+which is the crate that owns the composition root. If you add it to `orca-core`,
+the no-filesystem rule becomes unenforceable and the cycle-guard test starts
+depending on the machine it runs on.
+
 
 ## Layering rules
 
@@ -126,8 +173,9 @@ To add it:
    `--target x86_64-pc-windows-gnu`. GPUI needs a GNU-compatible linker; an
    MSVC cargo on `PATH` will fail here in a way that looks like a missing
    dependency.
-4. Re-run `cargo tree -p orca-core --target x86_64-pc-windows-gnu`. GPUI must
-   **not** appear. It will be in the tree, just not in that subtree.
+4. Re-run `cargo tree -p orca-core --edges normal --target x86_64-pc-windows-gnu`.
+   GPUI must **not** appear. It will be in the tree, just not in that subtree.
+   The `--edges normal` matters — see "How the rule is enforced" above.
 5. Commit the resulting `Cargo.lock` update. `Cargo.lock` is committed on
    purpose — see the note in `.gitignore`.
 
@@ -199,6 +247,41 @@ Memory across ten create/destroy cycles ran 73 → 95 MB and then settled around
 88 MB, which reads as bounded caching rather than a leak. Not run long enough to
 be certain; `tools/soak.ps1 -Cycles 200` would settle it.
 
+### Where the keystroke time actually goes
+
+Measured with `cargo bench -p orca-core --target x86_64-pc-windows-gnu` on the
+development machine, **debug profile, criterion 40 samples**. These are not
+shipped-build numbers and are not a claim about the running app — they are a
+lower bound, and the point is the *shape*:
+
+| operation | 100 items | 1 000 | 5 000 |
+|---|---|---|---|
+| `rank` with an empty query | 140 µs | 2.25 ms | 11.4 ms |
+| `rank` with a typed query | 123 µs | 1.65 ms | 7.8 ms |
+| `rank` with a long query | 206 µs | 2.36 ms | 7.8 ms |
+| one `match_score` | ~0.6 µs | — | — |
+| `frecency` score, warm | 152 ns | — | — |
+
+Three things fall out of that, and all three are design decisions rather than
+accidents:
+
+* **A typed query is *faster* than an empty one at 5 000 items** (7.8 ms vs
+  11.4 ms). The empty query keeps every candidate and sorts all 5 000; a typed
+  one drops the non-matches first. Ranking is not the bottleneck on the
+  keystroke path — collection is.
+* **The sort dominates, not the matching.** 5 000 × ~0.6 µs of `match_score` is
+  ~3 ms; the whole typed rank is 7.8 ms. A `min_score` that drops weak results
+  before the sort is the obvious lever if this ever needs to get cheaper.
+* **The fuzzy tier is the expensive tier, and it is bounded.** The
+  `min_fuzzy_length` default of 2 exists partly for this: one character is an
+  in-order subsequence of almost every string, so without it the fuzzy scan runs
+  over the whole catalogue for every keystroke and matches nearly everything.
+
+If ranking ever shows up in a latency profile, the first thing to check is
+whether the catalogue is actually a few hundred items, not a few thousand — and
+whether `ProviderSet::collect_all` is being called per keystroke rather than
+per toggle.
+
 ### Text encoding: a known, unfixed hazard
 
 `Window::handle_input` reports selection and caret positions in **UTF-16** code
@@ -232,3 +315,49 @@ build` picks the right host even before the `--target` flag is added.
 domain logic: it is testable, it changes without a UI rebuild, and it is the
 thing that gets tuned. The numbers currently in `Source::weight` are
 placeholders.
+
+**That is now done, and the policy is three normalised signals.**
+`policy::RankingPolicy` combines them in one place, and both weights are stored
+as a single fraction with their complements derived, so the halves cannot fail
+to sum to one:
+
+```text
+final = match_weight * match
+      + (1 - match_weight) * source_weight * (provider_share * provider
+                                           + (1 - provider_share) * frecency)
+```
+
+`match_weight` is 0.70 and `provider_share` is 0.40. Three consequences are
+asserted in the tests rather than left as intentions, because each is a
+deliberate trade someone will otherwise "fix":
+
+* **A cold exact match always outranks a browse candidate.** Typing can never be
+  a mistake.
+* **A weak match with a strong history *can* outrank a cold exact match.** That
+  is what frecency ranking means, and removing it would make the history
+  pointless. `RankingPolicy::match_weight` is the knob.
+* **Source weighting can never reorder two different match tiers** under the
+  default table, because the whole weight band is worth
+  `DEFAULT_MAX_SOURCE_SWING` and the narrowest tier gap is worth more. A
+  hand-written `[sources]` value of 0.0 or 1.0 *can* — that is
+  `MAX_ABSOLUTE_SOURCE_SWING`, exactly the prior budget, and a config author who
+  writes that is making a statement the code should carry out.
+
+**The fuzzy band is capped below the browse state on purpose.** `FUZZY_FLOOR +
+FUZZY_CEILING == 0.48 < BROWSE_SCORE == 0.50`, and both halves are asserted in
+a `const` block so a retune that breaks the invariant stops the crate compiling
+rather than quietly promoting typo matches above the recents list.
+
+**`SOURCE` weights are the one thing here that still needs real data.** The
+ordering (Application > Command > Calculator > Folder > File ≈ WebSearch >
+Clipboard > Unknown) is a product judgement, not a measurement. Tuning them
+against actual ranking data is the open work.
+
+## The dependencies orca-core now carries
+
+`serde` + `toml` for the config file, `rusqlite` with `bundled` for the frecency
+store, and `criterion` as a dev-dependency for the ranking benchmarks. The
+`bundled` feature is a deliberate trade: the SQLite amalgamation compiles into
+the binary, so a user's launcher works on a machine where nothing has been
+installed, at the cost of a slower first build.
+
