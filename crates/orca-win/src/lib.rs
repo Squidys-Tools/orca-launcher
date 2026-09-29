@@ -1,23 +1,71 @@
 //! `orca-win` — Windows platform integration for orca.
 //!
-//! Everything in this crate talks to the operating system: registering a
-//! global hotkey, deciding whether this process is the primary instance,
-//! toggling autostart, the tray icon, enumerating windows. The GPUI binary
-//! talks to this crate; this crate never talks to GPUI.
+//! Everything in this crate talks to the operating system: binding a global
+//! hotkey, deciding whether this process is the primary instance, toggling
+//! autostart, the tray icon, enumerating installed applications, and raising a
+//! window to the front. The GPUI binary talks to this crate; this crate never
+//! talks to GPUI.
 //!
-//! # Status: seams only
+//! # The seams
 //!
-//! The traits below are the real API surface the rest of the app will be
-//! written against, and each has a Win32 implementation that **honestly
-//! reports that it is not implemented**. None of them fakes success. The
-//! registry calls are not written yet.
+//! The two operations that claim exclusive global state — a system-wide
+//! hotkey and a `HKCU` registry value — sit behind traits ([`HotkeyBackend`]
+//! and [`RunValueStore`]). Everything above them is a state machine that can be
+//! driven by a fake, which is what makes the interesting behaviour testable:
+//! the tests assert that a refused hotkey leaves `is_registered()` false, that
+//! a rejected autostart path leaves the previous entry intact, and that a
+//! command really does travel from a second launch to the primary over a named
+//! pipe.
 //!
-//! Splitting the seams out before the behaviour means the shape of the
-//! platform layer is reviewable on its own, and the UI can be developed
-//! against a fake without a `RegisterHotKey` in the way.
+//! What a fake cannot prove is that Windows delivers a keypress or that Explorer
+//! runs a Run value. Those are recorded in `docs/ARCHITECTURE.md` from the
+//! probe; this crate does not pretend to re-establish them.
+//!
+//! # Mapping onto `orca-core`
+//!
+//! `orca-core` is pure, so none of its types appear here. The adapter is
+//! mechanical and lives in the binary:
+//!
+//! | `orca-win` | `orca-core` |
+//! |---|---|
+//! | [`Hotkey`] | the config value, parsed from a string via [`Hotkey::parse`] |
+//! | [`Win32GlobalHotkey`] | the `GlobalHotkey` the app is written against |
+//! | [`Win32SingleInstance`] + [`SECONDARY_INSTANCE_EXIT_CODE`] | `main`'s early exit |
+//! | [`Win32Autostart`] | the autostart preference |
+//! | [`TrayIcon`] | the tray menu and its actions |
+//! | [`installed_apps`] | a `ResultProvider` returning `ResultItem`s with `Source::Application` |
+//! | [`WindowHandle`] | whatever the UI layer produces for a window |
+
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 use std::error::Error;
 use std::fmt;
+
+mod apps;
+mod autostart;
+mod foreground;
+mod hotkey;
+mod single_instance;
+mod tray;
+mod wide;
+
+pub use apps::{
+    installed_apps, start_menu_apps_in, InstalledApp, InstalledAppSource, ShortcutResolver,
+};
+pub use autostart::{
+    run_command_for, AutostartError, HkcuRunStore, RunValueStore, Win32Autostart,
+    MAX_RUN_VALUE_LEN, RUN_KEY,
+};
+pub use foreground::{activate, is_foreground, ForegroundError, WindowHandle};
+pub use hotkey::{
+    hotkey_code, modifier_flags, virtual_key, GlobalHotkey, HotkeyBackend, HotkeyError,
+    Win32GlobalHotkey, Win32HotkeyBackend,
+};
+pub use single_instance::{
+    InstanceCommand, SingleInstanceError, Win32SingleInstance, DEFAULT_HANDSHAKE_TIMEOUT,
+    DEFAULT_MUTEX_NAME, DEFAULT_PIPE_NAME, SECONDARY_INSTANCE_EXIT_CODE,
+};
+pub use tray::{TrayError, TrayEvent, TrayIcon, TrayIconSource, TrayMenuItem, TraySpec};
 
 // ---------------------------------------------------------------------------
 // Hotkey value types
@@ -141,6 +189,12 @@ impl Hotkey {
         if modifiers.is_empty() && matches!(key, Key::Char(c) if c.is_alphanumeric()) {
             return Err(HotkeyParseError::UnsupportedCombination);
         }
+        // Punctuation has no layout-independent virtual-key code, so a global
+        // binding for it cannot be expressed. Rejecting it here means the
+        // failure is a config error, not a silent no-op at registration.
+        if virtual_key(key).is_none() {
+            return Err(HotkeyParseError::UnsupportedCombination);
+        }
 
         Ok(Hotkey { modifiers, key })
     }
@@ -208,206 +262,6 @@ fn parse_key(token: &str) -> Result<Key, HotkeyParseError> {
         _ => Err(HotkeyParseError::UnknownKey(token.to_owned())),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Global hotkey
-// ---------------------------------------------------------------------------
-
-/// Something went wrong binding or unbinding a system-wide hotkey.
-///
-/// Failures are reported, never swallowed. A [`HotkeyError::NotImplemented`]
-/// means the seam exists and the work has not been done — it is not a
-/// placeholder for a code path that should have succeeded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HotkeyError {
-    /// The Win32 implementation has not been written yet.
-    NotImplemented {
-        /// The operation that was attempted, for the log line.
-        operation: &'static str,
-    },
-    /// Windows refused the hotkey; another application already owns it.
-    AlreadyTaken,
-    /// [`GlobalHotkey::unregister`] was called with nothing registered.
-    NotRegistered,
-    /// Windows reported a failure for a reason we do not model.
-    SystemFailure {
-        /// The raw `GetLastError()` value, or `0` if unavailable.
-        code: u32,
-    },
-}
-
-impl fmt::Display for HotkeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HotkeyError::NotImplemented { operation } => write!(
-                f,
-                "{operation} is not implemented yet (orca-win is a stub; no Win32 call was made)"
-            ),
-            HotkeyError::AlreadyTaken => {
-                write!(f, "hotkey is already owned by another application")
-            }
-            HotkeyError::NotRegistered => write!(f, "no hotkey is registered"),
-            HotkeyError::SystemFailure { code } => {
-                write!(f, "hotkey call failed (Win32 error {code})")
-            }
-        }
-    }
-}
-
-impl Error for HotkeyError {}
-
-/// A system-wide hotkey: pressed while *any* application has focus.
-///
-/// `Send` because a real implementation owns a dedicated thread running a
-/// message loop, and the owner of the handle is not the UI thread.
-pub trait GlobalHotkey: Send {
-    /// Binds `hotkey` system-wide. On success, the handler is invoked on every
-    /// press until [`GlobalHotkey::unregister`].
-    fn register(&mut self, hotkey: &Hotkey) -> Result<(), HotkeyError>;
-
-    /// Releases the hotkey, if one is bound. Idempotent in spirit: calling it
-    /// without a registration is reported as [`HotkeyError::NotRegistered`]
-    /// rather than treated as a no-op success.
-    fn unregister(&mut self) -> Result<(), HotkeyError>;
-
-    /// Whether a hotkey is currently bound.
-    fn is_registered(&self) -> bool;
-}
-
-/// The real Win32 implementation. **Stub: performs no Win32 call.**
-///
-/// Constructing it is fine and side-effect free. Every method that would need
-/// the Win32 API returns [`HotkeyError::NotImplemented`], so a caller that
-/// ignores the error still ends up with `is_registered() == false` — it cannot
-/// mistake this for a working hotkey.
-#[derive(Debug, Default)]
-pub struct Win32GlobalHotkey {
-    registered: Option<Hotkey>,
-}
-
-impl Win32GlobalHotkey {
-    /// Creates an unbound hotkey registrar.
-    pub fn new() -> Win32GlobalHotkey {
-        Win32GlobalHotkey { registered: None }
-    }
-}
-
-impl GlobalHotkey for Win32GlobalHotkey {
-    fn register(&mut self, _hotkey: &Hotkey) -> Result<(), HotkeyError> {
-        Err(HotkeyError::NotImplemented {
-            operation: "RegisterHotKey",
-        })
-    }
-
-    fn unregister(&mut self) -> Result<(), HotkeyError> {
-        Err(HotkeyError::NotImplemented {
-            operation: "UnregisterHotKey",
-        })
-    }
-
-    fn is_registered(&self) -> bool {
-        // Always false: this stub never records a registration, so a caller
-        // that discards errors still sees an accurate answer.
-        self.registered.is_some()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Single instance
-// ---------------------------------------------------------------------------
-
-/// Something went wrong establishing whether this process is the primary one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SingleInstanceError {
-    /// The Win32 implementation has not been written yet.
-    NotImplemented {
-        /// The operation that was attempted, for the log line.
-        operation: &'static str,
-    },
-    /// Another process holds the lock and did not answer us.
-    AlreadyRunning,
-    /// Windows reported a failure for a reason we do not model.
-    SystemFailure {
-        /// The raw `GetLastError()` value, or `0` if unavailable.
-        code: u32,
-    },
-}
-
-impl fmt::Display for SingleInstanceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SingleInstanceError::NotImplemented { operation } => write!(
-                f,
-                "{operation} is not implemented yet (orca-win is a stub; no Win32 call was made)"
-            ),
-            SingleInstanceError::AlreadyRunning => write!(f, "another orca instance is running"),
-            SingleInstanceError::SystemFailure { code } => {
-                write!(f, "single-instance call failed (Win32 error {code})")
-            }
-        }
-    }
-}
-
-impl Error for SingleInstanceError {}
-
-/// Guards against a second copy of orca fighting over the same global hotkey,
-/// tray icon, and index database.
-///
-/// The launcher should show its window and exit rather than run twice, so the
-/// primary instance has to be decided before any global resource is claimed.
-pub trait SingleInstance: Send {
-    /// Attempts to become the primary instance.
-    ///
-    /// `Ok(true)` means this process is primary and should continue starting
-    /// up. `Ok(false)` means another instance is primary and this process
-    /// should signal it and exit.
-    fn try_acquire(&mut self) -> Result<bool, SingleInstanceError>;
-
-    /// Whether this process currently holds the primary role.
-    fn is_primary(&self) -> bool;
-
-    /// Gives up the primary role, if held.
-    fn release(&mut self) -> Result<(), SingleInstanceError>;
-}
-
-/// The real Win32 implementation. **Stub: performs no Win32 call.**
-///
-/// A real implementation will use a named mutex, or a window class plus
-/// `FindWindow`/atomically-registered message broadcast so the second
-/// instance can forward its arguments to the first.
-#[derive(Debug, Default)]
-pub struct Win32SingleInstance {
-    primary: bool,
-}
-
-impl Win32SingleInstance {
-    /// Creates a single-instance guard that has not yet claimed the role.
-    pub fn new() -> Win32SingleInstance {
-        Win32SingleInstance { primary: false }
-    }
-}
-
-impl SingleInstance for Win32SingleInstance {
-    fn try_acquire(&mut self) -> Result<bool, SingleInstanceError> {
-        Err(SingleInstanceError::NotImplemented {
-            operation: "CreateMutexW / FindWindowW",
-        })
-    }
-
-    fn is_primary(&self) -> bool {
-        self.primary
-    }
-
-    fn release(&mut self) -> Result<(), SingleInstanceError> {
-        Err(SingleInstanceError::NotImplemented {
-            operation: "ReleaseMutex / CloseHandle",
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -493,6 +347,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_keys_with_no_virtual_key_code() {
+        // `/` means different physical keys on different layouts, so there is
+        // no single VK to bind. Saying so at parse time beats a hotkey that
+        // silently never fires.
+        assert_eq!(
+            err(Hotkey::parse("Ctrl+/")),
+            HotkeyParseError::UnsupportedCombination
+        );
+    }
+
+    #[test]
     fn modifiers_union_contains_and_emptiness() {
         let combo = Modifiers::CTRL.union(Modifiers::SHIFT);
 
@@ -505,48 +370,8 @@ mod tests {
     }
 
     #[test]
-    fn the_win32_hotkey_stub_reports_failure_rather_than_faking_success() {
-        let mut hotkey = Win32GlobalHotkey::new();
-        let spec = Hotkey::parse("Ctrl+Shift+Space").expect("should parse");
-
-        assert!(!hotkey.is_registered());
-        assert_eq!(
-            hotkey.register(&spec),
-            Err(HotkeyError::NotImplemented {
-                operation: "RegisterHotKey"
-            })
-        );
-        // Ignoring the error must still leave us knowing nothing is bound.
-        assert!(!hotkey.is_registered());
-        assert_eq!(
-            hotkey.unregister(),
-            Err(HotkeyError::NotImplemented {
-                operation: "UnregisterHotKey"
-            })
-        );
-    }
-
-    #[test]
-    fn the_win32_single_instance_stub_reports_failure() {
-        let mut guard = Win32SingleInstance::new();
-
-        assert!(!guard.is_primary());
-        assert_eq!(
-            guard.try_acquire(),
-            Err(SingleInstanceError::NotImplemented {
-                operation: "CreateMutexW / FindWindowW"
-            })
-        );
-        assert!(!guard.is_primary());
-    }
-
-    #[test]
-    fn stub_errors_explain_themselves() {
-        let message = HotkeyError::NotImplemented {
-            operation: "RegisterHotKey",
-        }
-        .to_string();
-        assert!(message.contains("RegisterHotKey"), "{message}");
-        assert!(message.contains("not implemented"), "{message}");
+    fn parse_errors_explain_themselves() {
+        let message = HotkeyParseError::MissingKey.to_string();
+        assert!(message.contains("no key"), "{message}");
     }
 }

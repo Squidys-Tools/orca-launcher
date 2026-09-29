@@ -70,6 +70,42 @@ mismatch, not a rendering bug.
 - [ ] Correct size and position at 125% and 150% display scaling
 - [ ] Does not appear offscreen after a monitor is unplugged while it is open
 
+## `orca-win` platform calls
+
+These are implemented and unit-tested, but their tests stop at the seam. What a
+fake cannot prove is that Windows does the thing, so each row below is a real
+observation a human still has to make. `orca-win`'s tests cover the state
+machines (a refused hotkey leaves `is_registered()` false, a rejected autostart
+path leaves the previous entry intact, a second launch's command really does
+arrive over the named pipe) and the pure rules (virtual-key mapping, Run-value
+quoting and rejection, shortcut and App Paths naming, de-duplication).
+
+- [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
+      handler runs, then unbind and confirm the combination is free again
+- [ ] Bind a hotkey another app already owns: confirm the failure is *reported*,
+      not a crash, and that the launcher carries on
+- [ ] Start the launcher twice: the second launch must raise the first window and
+      exit with code 2, and must not leave a second tray icon
+- [ ] Start the launcher and kill it, then start it again: the second start must
+      succeed (the named mutex is released when the last handle closes)
+- [ ] Enable autostart, then check the value Explorer will read:
+      `Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'`
+      should show a quoted path
+- [ ] Log out and back in: the launcher must come up
+- [ ] Disable autostart twice in a row: the second call must succeed
+- [ ] Tray icon: left click shows the launcher; right click opens the menu; a
+      menu entry fires its command; quitting removes the icon with no ghost left
+      in the notification area
+- [ ] Tray icon at the same time as a second launcher instance running: the icon
+      must not be duplicated
+- [ ] `activate(hwnd)` on a minimised window: it must come back to the front, not
+      stay minimised behind the other app
+- [ ] Launch from a shortcut in a folder with spaces in its path, to confirm the
+      quoting in the Run value is doing its job
+- [ ] `installed_apps()` from a background executor: it must not block a frame,
+      and the list must include something from the Start Menu *and* something
+      from App Paths
+
 ## Not yet built
 
 These do not exist yet; listed so nobody assumes they are done:
@@ -79,3 +115,6 @@ These do not exist yet; listed so nobody assumes they are done:
 - Multiple monitors and DPI are untested.
 - `cx.activate(true)` is a no-op on Windows; `Window::activate_window()` is used
   instead. The first keystroke after activation is worth watching for.
+- A real application icon for the tray. `TrayIconSource::Application` uses the
+  stock system icon, which is deliberately never destroyed; shipping a `.ico`
+  via `TrayIconSource::File` is untested.
