@@ -123,11 +123,13 @@ depending on the machine it runs on.
 3. **`orca-win` is the only place Win32 is called.** It exposes traits
    (`GlobalHotkey`, `SingleInstance`) so the rest of the app is written against
    a seam and can be driven by a fake in tests.
-4. **Stubs fail, they do not pretend.** Every unimplemented platform operation
-   returns `NotImplemented`. A caller that ignores the error still cannot
-   conclude that the operation worked — `is_registered()` stays `false`. This
-   is why `Win32GlobalHotkey::register` does not set its `registered` field
-   before returning its error.
+4. **No operation lies about having happened.** There are no `NotImplemented`
+   variants left to hide behind — the platform layer is implemented. What
+   replaces that rule is stricter in the way that matters: a failed operation
+   never leaves the object in a state that reads as success.
+   `Win32GlobalHotkey::register` does not set its `registered` field before
+   returning its error, so a caller that ignores the error still cannot conclude
+   the hotkey was claimed. Every stateful operation follows this shape.
 5. **`orca` is a composition root, not a library.** Logic that is not about
    wiring belongs in one of the other two crates.
 
