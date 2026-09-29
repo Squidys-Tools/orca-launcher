@@ -179,13 +179,22 @@ impl Hotkey {
         }
 
         let key = key.ok_or(HotkeyParseError::MissingKey)?;
-        // Windows cannot bind Alt+Ctrl globally; several combinations are also
-        // reserved by the system. Rejecting known-unsupported pairs here keeps
-        // the failure at config-parse time instead of at registration time.
-        let unbound = Modifiers::ALT.union(Modifiers::CTRL);
-        if modifiers.contains(unbound) {
-            return Err(HotkeyParseError::UnsupportedCombination);
-        }
+        // There is deliberately NO rule rejecting `Ctrl+Alt` here. An earlier
+        // version of this parser refused every `Alt+Ctrl` combination on the
+        // claim that Windows cannot bind one globally. That claim is false and
+        // it was expensive: the probe registered `Ctrl+Alt+Space` through the
+        // real `RegisterHotKey` and drove it across ten open/hide cycles, so
+        // `Ctrl+Alt+Space` is the launcher's shipped default and this parser
+        // used to reject its own default. `orca` then grew a second, laxer
+        // parser to work around it — two parsers that could drift apart.
+        //
+        // Windows does reserve a small set of combinations (Ctrl+Alt+Del,
+        // Win+L, Alt+Tab, F12). Those are refused by `RegisterHotKey` itself,
+        // and letting the platform answer is more honest than guessing at its
+        // reserved set from here.
+        //
+        // A bare unmodified alphanumeric key IS rejected below, because binding
+        // one globally would swallow that character in every other application.
         if modifiers.is_empty() && matches!(key, Key::Char(c) if c.is_alphanumeric()) {
             return Err(HotkeyParseError::UnsupportedCombination);
         }
@@ -334,14 +343,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_combinations_windows_cannot_bind_globally() {
-        assert_eq!(
-            err(Hotkey::parse("Ctrl+Alt+K")),
-            HotkeyParseError::UnsupportedCombination
-        );
+    fn rejects_a_bare_alphanumeric_key_but_not_ctrl_alt() {
         // A bare alphanumeric key would swallow normal typing globally.
         assert_eq!(
             err(Hotkey::parse("K")),
+            HotkeyParseError::UnsupportedCombination
+        );
+        assert_eq!(
+            err(Hotkey::parse("7")),
+            HotkeyParseError::UnsupportedCombination
+        );
+
+        // `Ctrl+Alt` used to be rejected here on the claim that Windows cannot
+        // bind it globally. That claim is false: the probe registered
+        // `Ctrl+Alt+Space` via the real `RegisterHotKey` and drove ten
+        // open/hide cycles with it, and this is the launcher's shipped default.
+        // Rejecting it here made `orca` carry a second, laxer hotkey parser as a
+        // workaround. Windows does reserve some combinations (Ctrl+Alt+Del,
+        // Win+L, Alt+Tab, F12), but `RegisterHotKey` refuses those itself, and
+        // guessing at the reserved set from the parser is what caused the bug.
+        for spec in ["Ctrl+Alt+K", "Ctrl+Alt+Space", "Alt+Ctrl+K"] {
+            let hotkey = Hotkey::parse(spec)
+                .unwrap_or_else(|e| panic!("{spec} must be bindable, got {e:?}"));
+            assert!(hotkey.modifiers.contains(Modifiers::CTRL), "{spec}");
+            assert!(hotkey.modifiers.contains(Modifiers::ALT), "{spec}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_key_with_no_virtual_key_code() {
+        // `/` has no layout-independent virtual-key code, so no global binding
+        // for it can be expressed. This is a fact about keyboard layouts, not
+        // about the API, so it stays rejected.
+        assert_eq!(
+            err(Hotkey::parse("Ctrl+/")),
             HotkeyParseError::UnsupportedCombination
         );
     }

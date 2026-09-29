@@ -62,9 +62,8 @@ use orca_core::providers::{CommandProvider, EnvVarProvider, ProviderSet};
 use orca_core::store::sqlite::SqliteUsageStore;
 use orca_core::store::UsageStore;
 use orca_win::{
-    GlobalHotkey, Hotkey, HotkeyParseError, InstanceCommand, Key, Modifiers, TrayIcon,
-    TrayMenuItem, TraySpec, Win32GlobalHotkey, Win32SingleInstance, DEFAULT_HANDSHAKE_TIMEOUT,
-    SECONDARY_INSTANCE_EXIT_CODE,
+    GlobalHotkey, Hotkey, InstanceCommand, TrayIcon, TrayMenuItem, TraySpec, Win32GlobalHotkey,
+    Win32SingleInstance, DEFAULT_HANDSHAKE_TIMEOUT, SECONDARY_INSTANCE_EXIT_CODE,
 };
 
 use crate::catalog::{Catalog, Engine};
@@ -249,7 +248,7 @@ fn register_hotkey(hotkey: &mut Win32GlobalHotkey, spec: &str, commands: &Sender
         let _ = sender.send_blocking(UiCommand::Toggle);
     }));
 
-    match hotkey_from_spec(spec) {
+    match Hotkey::parse(spec) {
         Ok(parsed) => match hotkey.register(&parsed) {
             Ok(()) => log(&format!("hotkey: {spec} registered")),
             // `register` does not mark itself bound on failure, so this
@@ -258,81 +257,6 @@ fn register_hotkey(hotkey: &mut Win32GlobalHotkey, spec: &str, commands: &Sender
             Err(error) => degraded(&format!("hotkey {spec}"), error),
         },
         Err(error) => degraded(&format!("hotkey spec {spec:?}"), error),
-    }
-}
-
-/// Turns a config spec into an `orca-win` hotkey, with one documented retry.
-///
-/// `orca_win::Hotkey::parse` refuses `Ctrl+Alt` on the grounds that Windows
-/// cannot bind it. The probe bound `Ctrl+Alt+Space` successfully at runtime, so
-/// for exactly that one refusal this falls back to building the `Hotkey` value
-/// directly and lets the Win32 backend have the final say. Every *other* parse
-/// error is returned unchanged, and a combination the backend also refuses is
-/// reported by `register` — so nothing is silently bound and nothing is silently
-/// ignored.
-///
-/// `Ctrl+Alt+Space` is the launcher's conventional hotkey and the config author
-/// is entitled to it, so the workaround lives here rather than in a note. See the
-/// "Suspected bug" section of the change notes for the upstream fix.
-fn hotkey_from_spec(spec: &str) -> Result<Hotkey, HotkeyParseError> {
-    match Hotkey::parse(spec) {
-        Ok(hotkey) => Ok(hotkey),
-        Err(error) if error != HotkeyParseError::UnsupportedCombination => Err(error),
-        Err(_) => split_spec(spec).ok_or(HotkeyParseError::UnsupportedCombination),
-    }
-}
-
-/// Splits a spec into modifiers and a key.
-///
-/// Mirrors `orca_win::Hotkey::parse`'s tokeniser, minus the two rules that
-/// reject combinations this function is deliberately retrying. Re-checks that
-/// the key has a virtual-key code, because that rule *is* correct: a global
-/// binding for `/` cannot be expressed on Windows, and that is a fact about
-/// layouts rather than about the API.
-fn split_spec(spec: &str) -> Option<Hotkey> {
-    let mut modifiers = Modifiers::NONE;
-    let mut key: Option<Key> = None;
-
-    for segment in spec.split('+') {
-        let token = segment.trim().to_ascii_lowercase();
-        match token.as_str() {
-            "alt" => modifiers = modifiers.union(Modifiers::ALT),
-            "ctrl" | "control" => modifiers = modifiers.union(Modifiers::CTRL),
-            "shift" => modifiers = modifiers.union(Modifiers::SHIFT),
-            "win" | "meta" | "super" => modifiers = modifiers.union(Modifiers::WIN),
-            _ => {
-                if key.is_some() {
-                    return None;
-                }
-                key = Some(key_from_token(&token)?);
-            }
-        }
-    }
-
-    let key = key?;
-    orca_win::virtual_key(key)?;
-    Some(Hotkey { modifiers, key })
-}
-
-/// One already-lowercased spec token as a `Key`.
-fn key_from_token(token: &str) -> Option<Key> {
-    match token {
-        "space" => return Some(Key::Space),
-        "enter" | "return" => return Some(Key::Enter),
-        "tab" => return Some(Key::Tab),
-        "esc" | "escape" => return Some(Key::Escape),
-        "backspace" => return Some(Key::Backspace),
-        "del" | "delete" => return Some(Key::Delete),
-        _ => {}
-    }
-    if let Some(digits) = token.strip_prefix('f') {
-        let index: u8 = digits.parse().ok()?;
-        return (1..=24).contains(&index).then_some(Key::Function(index));
-    }
-    let mut chars = token.chars();
-    match (chars.next(), chars.next()) {
-        (Some(character), None) => Some(Key::Char(character)),
-        _ => None,
     }
 }
 
@@ -654,39 +578,56 @@ mod tests {
     use orca_core::config::HotkeySpec;
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
 
-    use super::{hotkey_from_spec, split_spec, POPUP_HEIGHT, POPUP_WIDTH};
+    use super::{POPUP_HEIGHT, POPUP_WIDTH};
 
     #[test]
     fn the_config_default_hotkey_parses_the_normal_way() {
         let spec = HotkeySpec::DEFAULT_SPEC;
-        let hotkey = hotkey_from_spec(spec).expect("the shipped default must bind");
+        let hotkey = Hotkey::parse(spec).expect("the shipped default must bind");
         assert_eq!(hotkey.key, Key::Space);
         assert!(hotkey.modifiers.contains(Modifiers::CTRL));
         assert!(hotkey.modifiers.contains(Modifiers::SHIFT));
     }
 
     #[test]
-    fn ctrl_alt_space_is_recovered_from_the_parser_that_refuses_it() {
-        // `orca_win::Hotkey::parse` rejects this, so `hotkey_from_spec` has to
-        // be what makes the launcher's conventional hotkey configurable at all.
-        assert_eq!(
-            Hotkey::parse("Ctrl+Alt+Space").expect_err("orca-win refuses this"),
-            HotkeyParseError::UnsupportedCombination
-        );
-        let hotkey = hotkey_from_spec("Ctrl+Alt+Space").expect("the retry must succeed");
+    fn ctrl_alt_combinations_parse_without_a_workaround() {
+        // Regression test. `orca_win::Hotkey::parse` used to reject every
+        // `Ctrl+Alt` combination as unbindable, and `orca` carried a second,
+        // laxer parser to work around it. The claim was false: the probe bound
+        // `Ctrl+Alt+Space` through the real `RegisterHotKey` and drove ten
+        // open/hide cycles with it. There is now one parser, and it must accept
+        // the combination the launcher actually ships.
+        for spec in ["Ctrl+Alt+Space", "Ctrl+Alt+K", "Alt+Ctrl+Space"] {
+            let hotkey = Hotkey::parse(spec).unwrap_or_else(|e| panic!("{spec} must parse: {e}"));
+            assert!(hotkey.modifiers.contains(Modifiers::CTRL), "{spec}");
+            assert!(hotkey.modifiers.contains(Modifiers::ALT), "{spec}");
+        }
+        let hotkey = Hotkey::parse("Ctrl+Alt+Space").expect("the conventional hotkey must bind");
         assert_eq!(hotkey.key, Key::Space);
-        assert!(hotkey.modifiers.contains(Modifiers::CTRL));
-        assert!(hotkey.modifiers.contains(Modifiers::ALT));
     }
 
     #[test]
-    fn the_retry_does_not_rescue_a_key_windows_cannot_bind() {
-        // The rule that is *correct* stays in force: `/` has no layout-
-        // independent virtual-key code, so no global binding can be expressed.
+    fn a_key_with_no_virtual_key_code_is_still_refused() {
+        // The rule that was always correct stays in force: `/` has no
+        // layout-independent virtual-key code, so no global binding can be
+        // expressed for it. This is a fact about layouts, not about the API.
         assert_eq!(
-            hotkey_from_spec("Ctrl+/").expect_err("must still be refused"),
+            Hotkey::parse("Ctrl+/").expect_err("must still be refused"),
             HotkeyParseError::UnsupportedCombination
         );
+    }
+
+    #[test]
+    fn a_bare_alphanumeric_key_is_refused_so_it_cannot_swallow_typing() {
+        // Binding an unmodified letter globally would intercept that key in
+        // every other application on the desktop.
+        for spec in ["A", "k", "7"] {
+            assert_eq!(
+                Hotkey::parse(spec).expect_err("a bare key must be refused"),
+                HotkeyParseError::UnsupportedCombination,
+                "for spec {spec}"
+            );
+        }
     }
 
     #[test]
@@ -711,7 +652,7 @@ mod tests {
         ];
         for (spec, expected) in cases {
             assert_eq!(
-                hotkey_from_spec(spec).expect_err("must not parse"),
+                Hotkey::parse(spec).expect_err("must not parse"),
                 expected,
                 "for spec {spec:?}"
             );
@@ -719,32 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn the_retry_agrees_with_the_parser_about_which_specs_are_well_formed() {
-        // Whatever `split_spec` accepts, `Hotkey::parse` must have rejected only
-        // for the `Ctrl+Alt` / bare-key reason — otherwise the retry has quietly
-        // become a second, laxer parser.
-        for spec in [
-            "Ctrl+Shift+K",
-            "Win+F5",
-            "Alt+Del",
-            "Ctrl+Escape",
-            "ctrl+shift+k",
-            "Ctrl+Alt+Space",
-        ] {
-            let parsed = split_spec(spec).unwrap_or_else(|| panic!("{spec} did not split"));
-            assert!(orca_win::virtual_key(parsed.key).is_some(), "{spec}");
-            assert!(
-                parsed
-                    .modifiers
-                    .contains(Modifiers::ALT.union(Modifiers::CTRL))
-                    == spec.to_ascii_lowercase().contains("ctrl+alt"),
-                "{spec} lost or gained a modifier"
-            );
-        }
-    }
-
-    #[test]
-    fn every_key_token_the_retry_understands_maps_to_a_virtual_key() {
+    fn every_key_token_parses_to_something_bindable() {
         for (spec, key) in [
             ("Ctrl+Space", Key::Space),
             ("Ctrl+Enter", Key::Enter),
@@ -757,7 +673,7 @@ mod tests {
             ("Ctrl+K", Key::Char('k')),
             ("Ctrl+4", Key::Char('4')),
         ] {
-            let hotkey = hotkey_from_spec(spec).expect("should parse");
+            let hotkey = Hotkey::parse(spec).expect("should parse");
             assert_eq!(hotkey.key, key, "for spec {spec}");
             assert!(
                 orca_win::virtual_key(hotkey.key).is_some(),
