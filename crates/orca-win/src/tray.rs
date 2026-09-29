@@ -143,10 +143,64 @@ impl TrayMenuItem {
 /// Where the icon image comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayIconSource {
-    /// The stock application icon. Nothing to load and nothing to destroy.
+    /// The stock application icon, loaded from the system.
+    ///
+    /// It is a *shared* system resource: used, never destroyed. See
+    /// [`load_icon`].
     Application,
     /// A `.ico` file. Loaded, and destroyed after `NIM_DELETE`.
     File(std::path::PathBuf),
+}
+
+/// An `HICON` together with whether this process is allowed to destroy it.
+///
+/// Ownership was the bug here. The stock application icon is a shared system
+/// resource, and `DestroyIcon` on it damages every other process using it, so it
+/// must never be freed. A `.ico` file handle is owned outright and must be freed,
+/// or it leaks for the life of the process. Both paths existed and both were
+/// reachable; deciding at the call site meant three separate `DestroyIcon` calls
+/// that all had to remember a rule the type did not carry.
+#[derive(Debug, Clone, Copy)]
+struct OwnedIcon {
+    handle: HICON,
+    destroyable: bool,
+}
+
+impl OwnedIcon {
+    /// Takes a handle that this process owns and must destroy.
+    fn owned(handle: HICON) -> Self {
+        Self {
+            handle,
+            destroyable: true,
+        }
+    }
+
+    /// Borrows a shared system handle that must never be destroyed.
+    fn shared(handle: HICON) -> Self {
+        Self {
+            handle,
+            destroyable: false,
+        }
+    }
+
+    fn handle(&self) -> HICON {
+        self.handle
+    }
+
+    /// Releases the handle, but only if this process owns it.
+    ///
+    /// Call this *after* `NIM_DELETE`, never before: the shell holds a reference
+    /// to the image for as long as its notification-area entry exists.
+    fn release(&self) {
+        if self.destroyable {
+            // SAFETY: `destroyable` is set only by `owned`, which is used only for
+            // `LR_LOADFROMFILE` handles that this process owns. Callers issue
+            // `NIM_DELETE` first, so no shell entry still references the image.
+            unsafe {
+                let _ = DestroyIcon(self.handle);
+            }
+        }
+    }
 }
 
 /// What the tray icon is made of.
@@ -219,9 +273,16 @@ pub(crate) fn notify_icon_data(
     if operation != NIM_DELETE {
         // NIF_MESSAGE is what routes the shell's clicks back to `hwnd` at all;
         // without it the icon is inert and nothing is ever delivered.
-        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        data.uFlags = NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = TRAY_CALLBACK_MESSAGE;
-        data.hIcon = icon;
+        // NIF_ICON is only claimed when there is actually an icon to show.
+        // Claiming it with a null `hIcon` adds an entry the shell cannot draw,
+        // which is a blank slot in the notification area — worse than no entry,
+        // because the user sees something that looks broken.
+        if !icon.is_invalid() {
+            data.uFlags |= NIF_ICON;
+            data.hIcon = icon;
+        }
         copy_wide_fixed(tooltip, &mut data.szTip);
     }
 
@@ -396,24 +457,24 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
         }
     };
 
-    // SAFETY: `hwnd` is live, `icon` is either absent (the shell draws its own
-    // default) or a handle this thread owns, and `notify_icon_data` builds a
-    // fully initialised buffer whose address is passed. The shell copies what it
-    // needs before returning, so the buffer's stack lifetime is sufficient.
+    // SAFETY: `hwnd` is live, `icon` is a handle whose ownership `OwnedIcon`
+    // tracks, and `notify_icon_data` builds a fully initialised buffer whose
+    // address is passed. The shell copies what it needs before returning, so the
+    // buffer's stack lifetime is sufficient.
+    let icon_handle = icon.map(|icon| icon.handle()).unwrap_or_default();
     let added = unsafe {
-        let data = notify_icon_data(NIM_ADD, hwnd, icon.unwrap_or_default(), &spec.tooltip);
+        let data = notify_icon_data(NIM_ADD, hwnd, icon_handle, &spec.tooltip);
         Shell_NotifyIconW(NIM_ADD, &data)
     };
     if !added.as_bool() {
-        // The icon is not registered, so the `icon` is ours to destroy, and the
-        // window must go so `state` is reclaimed.
+        // The icon is not registered, so no shell entry references the image and
+        // it is safe to release. The window must also go so `state` is reclaimed.
         let code = unsafe { windows::Win32::Foundation::GetLastError() }.0;
-        // SAFETY: `icon` was loaded here and is not referenced by any shell
-        // entry, because the add failed.
+        if let Some(icon) = icon {
+            icon.release();
+        }
+        // SAFETY: `hwnd` is live and owned here.
         unsafe {
-            if let Some(icon) = icon {
-                let _ = DestroyIcon(icon);
-            }
             let _ = DestroyWindow(hwnd);
         }
         unregister_class(module, &class_wide);
@@ -438,10 +499,9 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
             let _ = DestroyWindow(hwnd);
         }
         if let Some(icon) = icon {
-            // SAFETY: the shell entry that referenced it is gone.
-            unsafe {
-                let _ = DestroyIcon(icon);
-            }
+            // The shell entry that referenced it is gone, so a file-backed
+            // handle can be released. A shared system handle is not ours to free.
+            icon.release();
         }
         unregister_class(module, &class_wide);
         return;
@@ -476,11 +536,10 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
         let _ = DestroyWindow(hwnd);
     }
     if let Some(icon) = icon {
-        // SAFETY: the shell entry that referenced the image has been deleted,
-        // so nothing outside this process still holds it.
-        unsafe {
-            let _ = DestroyIcon(icon);
-        }
+        // The shell entry that referenced the image has been deleted, so nothing
+        // outside this process still holds a file-backed handle. A shared system
+        // handle is deliberately left alone.
+        icon.release();
     }
     unregister_class(module, &class_wide);
 }
@@ -701,30 +760,31 @@ unsafe fn show_menu(hwnd: HWND, menu: &[TrayMenuItem]) -> Option<String> {
     menu.get(index).map(|item| item.command.clone())
 }
 
-/// Loads the icon image, or `None` to let the shell draw its own default.
+/// Loads the icon image.
 ///
-/// The distinction matters: the stock application icon is a *shared* system
-/// resource, and `DestroyIcon` on it would damage every other process using
-/// it. Only a file-backed icon is owned by this thread.
-fn load_icon(source: &TrayIconSource) -> Result<Option<HICON>, TrayError> {
+/// The stock application icon comes from `LoadImageW` with a null module, so it
+/// is a *shared* system resource. It is used but never destroyed: `DestroyIcon`
+/// on it would damage every other process using it, and the handle stays valid
+/// for the process lifetime anyway. The returned [`OwnedIcon`] carries that
+/// distinction, so the destroy call sites cannot get it wrong.
+///
+/// This function used to load the icon purely as a check and then return `None`,
+/// throwing the handle away. The caller sent `NIM_ADD` with `NIF_ICON` set and a
+/// null `hIcon`, and the notification area got an entry the shell could not draw.
+/// It failed silently: no error, and a blank slot rather than an obvious absence.
+fn load_icon(source: &TrayIconSource) -> Result<Option<OwnedIcon>, TrayError> {
     match source {
         TrayIconSource::Application => {
-            // Verified on purpose, not used: if the shared icon cannot be
-            // loaded the shell still draws a default, so there is no reason to
-            // own a handle we must not destroy. Checking it here turns "the icon
-            // is silently missing" into a reported error.
             // SAFETY: a null module asks for the system icon; the
-            // MAKEINTRESOURCE constant is the documented way to name one.
-            let probe =
-                unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE) };
-            if probe.is_err() {
-                return Err(TrayError::WindowCreationFailed {
-                    code: crate::single_instance::last_error_code(
-                        &probe.expect_err("checked above"),
-                    ),
-                });
+            // MAKEINTRESOURCE constant is the documented way to name one, and
+            // `LR_DEFAULTSIZE` with zero dimensions means "the system's default
+            // size for this icon type".
+            match unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE) } {
+                Ok(handle) => Ok(Some(OwnedIcon::shared(HICON(handle.0)))),
+                Err(e) => Err(TrayError::WindowCreationFailed {
+                    code: crate::single_instance::last_error_code(&e),
+                }),
             }
-            Ok(None)
         }
         TrayIconSource::File(path) => {
             let wide = crate::wide::wide_path_nul(path);
@@ -741,9 +801,9 @@ fn load_icon(source: &TrayIconSource) -> Result<Option<HICON>, TrayError> {
                     LR_LOADFROMFILE | LR_DEFAULTSIZE,
                 )
             } {
-                // SAFETY: LoadImageW with LR_LOADFROMFILE returns a handle the
-                // caller owns and must release with DestroyIcon.
-                Ok(handle) => Ok(Some(HICON(handle.0))),
+                // LoadImageW with LR_LOADFROMFILE returns a handle the caller
+                // owns and must release with DestroyIcon, so it is `owned`.
+                Ok(handle) => Ok(Some(OwnedIcon::owned(HICON(handle.0)))),
                 Err(e) => Err(TrayError::WindowCreationFailed {
                     code: crate::single_instance::last_error_code(&e),
                 }),
@@ -953,7 +1013,8 @@ mod tests {
 
     #[test]
     fn the_add_buffer_carries_the_fields_the_shell_needs() {
-        let data = notify_icon_data(NIM_ADD, HWND::default(), HICON::default(), "orca");
+        let icon = HICON(0x1234 as *mut std::ffi::c_void);
+        let data = notify_icon_data(NIM_ADD, HWND::default(), icon, "orca");
 
         assert_eq!(data.cbSize, std::mem::size_of::<NOTIFYICONDATAW>() as u32);
         assert!(data.uFlags.contains(NIF_MESSAGE));
@@ -961,6 +1022,42 @@ mod tests {
         assert!(data.uFlags.contains(NIF_TIP));
         assert_eq!(data.uCallbackMessage, TRAY_CALLBACK_MESSAGE);
         assert_eq!(data.uID, TRAY_ICON_ID);
+        assert_eq!(data.hIcon, icon);
+    }
+
+    #[test]
+    fn nif_icon_is_never_set_without_an_icon() {
+        // Regression test for the blank notification-area entry.
+        //
+        // `load_icon` used to load the system icon purely as a check and return
+        // `None`, so `NIM_ADD` went out with `NIF_ICON` set and `hIcon` null.
+        // Windows accepts that and puts an entry in the notification area that it
+        // cannot draw — a blank slot, and no error anywhere. The tray icon was
+        // simply invisible, and nothing said why.
+        let data = notify_icon_data(NIM_ADD, HWND::default(), HICON::default(), "orca");
+        assert!(
+            !data.uFlags.contains(NIF_ICON),
+            "a null hIcon must not claim NIF_ICON"
+        );
+        // The entry is still useful: the tooltip and the click routing remain.
+        assert!(data.uFlags.contains(NIF_MESSAGE));
+        assert!(data.uFlags.contains(NIF_TIP));
+    }
+
+    #[test]
+    fn a_shared_system_icon_is_never_destroyed() {
+        // `DestroyIcon` on the stock application icon would damage every other
+        // process using it. The ownership flag is what stops that, and this
+        // asserts the flag is set correctly for each source.
+        // Non-dangling placeholders: `release` is not called here, so no
+        // `DestroyIcon` ever sees these values.
+        let shared = OwnedIcon::shared(HICON(std::ptr::dangling_mut()));
+        let owned = OwnedIcon::owned(HICON(std::ptr::dangling_mut()));
+        assert!(
+            !shared.destroyable,
+            "a LoadImageW system icon must never be destroyable"
+        );
+        assert!(owned.destroyable, "a LoadImageW file icon must be released");
     }
 
     #[test]

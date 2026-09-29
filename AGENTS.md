@@ -46,7 +46,8 @@ not present new static reasoning as if it were observed at runtime.
 |---|---|
 | Can the popup be toggled repeatedly? | **Yes** — 10 hide/show cycles confirmed by a human, `visible=true foreground=true` on every show |
 | Was the "cannot reopen after Esc" bug ever about the hotkey? | No — it was the command pump (see `ARCHITECTURE.md`) |
-| Is the tray icon working? | **Was broken**; fixed but *not yet* re-verified. The old `tray icon unavailable … 1813` line should be gone. |
+| How fast is the popup? | 1st open ~1 s, every later open <30 ms. Cold start is the only slow part. |
+| Is the tray icon working? | **Not yet** — two fixes applied, neither confirmed. Check for a blank slot, not a missing one. |
 
 ## Verify with the gate, not with ad-hoc commands
 

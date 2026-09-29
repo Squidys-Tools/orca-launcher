@@ -457,6 +457,30 @@ calling thread, in a fixed order:
 6. `orca_win::activate` — the real foreground activation, which already carries
    the `AttachThreadInput` workaround the foreground lock requires.
 
+## A null `hIcon` with `NIF_ICON` set is a blank icon, not an error
+
+The tray icon never appeared, with no error reported. `Shell_NotifyIcon` was
+called with `NIF_ICON` in the flags and `hIcon` null, and Windows accepts that:
+it adds a notification-area entry it cannot draw. The visible result is an empty
+slot in the tray, which reads as "broken" rather than "missing".
+
+The cause was an over-cautious earlier decision. `load_icon` loaded the system
+icon *purely to check it could be loaded*, then returned `None` and dropped the
+handle, on the reasoning that the stock icon is a shared system resource that
+must never be destroyed. That reasoning was right about `DestroyIcon` and wrong
+about the rest: a shared handle can be used indefinitely, and the safe thing was
+to use it and simply never free it.
+
+Two rules now hold, and both are tested:
+
+* `NIF_ICON` is set only when there is a real handle. An entry the shell cannot
+  draw is worse than no entry, because the user sees something.
+* Icon ownership travels with the handle in `OwnedIcon`, which carries a
+  `destroyable` flag. `LoadImageW` on a `.ico` file is owned and released;
+  `LoadImageW` on `IDI_APPLICATION` is shared and never released. Three separate
+  `DestroyIcon` call sites previously each had to remember a rule the type did
+  not carry, which is how the shared handle was about to be freed.
+
 ## Log what you measured, not what you intended
 
 The reason this bug took two attempts is worth recording, because it is a
