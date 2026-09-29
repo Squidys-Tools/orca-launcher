@@ -14,8 +14,30 @@ publish.workspace = true
 #   * windows / windows-sys / winapi — anything that binds Win32. Platform
 #                             integration lives in orca-win.
 #
-# The list below is empty and that is the enforced state, verified with:
+# Every dependency below is cross-platform and free of any UI or OS binding.
+# The rule is verified with:
 #
 #   cargo tree -p orca-core --target x86_64-pc-windows-gnu
 #
+# `serde`/`toml` parse the config file, `rusqlite` (bundled, so there is no
+# system SQLite to install) holds the frecency history, and `criterion` is a
+# dev-only dependency for the ranking benchmarks. None of them can reach a
+# window or a Win32 call, which is the property being protected.
 [dependencies]
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+# The gate runs `cargo build --workspace --all-targets` and
+# `cargo clippy --workspace --all-targets`, so this target is compiled and
+# linted on every green build. `test = false` keeps `cargo test` from *running*
+# the benchmarks: criterion would otherwise execute every one of them once per
+# `cargo test`, adding minutes of wall clock to a step whose verdict is the unit
+# tests.
+[[bench]]
+name = "ranking"
+harness = false
+test = false
