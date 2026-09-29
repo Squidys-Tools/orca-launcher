@@ -590,6 +590,18 @@ mod tests {
     }
 
     #[test]
+    fn the_default_spec_is_accepted_by_the_single_parser() {
+        // Guards the seam between the two crates: the default the config layer
+        // ships must be one the platform parser accepts, or the launcher starts
+        // with no hotkey and only a log line to say so. A human cannot catch
+        // this from a screenshot.
+        let spec = HotkeySpec::DEFAULT_SPEC;
+        let hotkey = Hotkey::parse(spec)
+            .unwrap_or_else(|e| panic!("the shipped default {spec:?} must parse: {e:?}"));
+        assert!(orca_win::virtual_key(hotkey.key).is_some(), "{spec}");
+    }
+
+    #[test]
     fn ctrl_alt_combinations_parse_without_a_workaround() {
         // Regression test. `orca_win::Hotkey::parse` used to reject every
         // `Ctrl+Alt` combination as unbindable, and `orca` carried a second,
