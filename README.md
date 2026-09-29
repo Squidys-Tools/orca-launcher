@@ -36,24 +36,33 @@ Confirm the GNU toolchain actually won:
 rustc -vV   # host: x86_64-pc-windows-gnu
 ```
 
-## Build and verify
+## Build and run
 
 ```powershell
-$env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
-
-cargo build --target x86_64-pc-windows-gnu
-cargo test  --target x86_64-pc-windows-gnu
-cargo fmt --check
-cargo clippy --target x86_64-pc-windows-gnu -- -D warnings
-cargo run   --target x86_64-pc-windows-gnu -p orca
+./tools/run.ps1
 ```
 
-Running `cargo run -p orca` prints a startup summary and exercises both library
-crates. It does not open a window.
+That is the command you need. It selects the GNU toolchain, stops any copy of
+orca already running, builds, launches, and saves the output to `run.log`. The
+launcher opens no window at startup — it waits for `Ctrl+Shift+Space`, then shows
+a popup. Press that again to hide it.
 
-The `--target` flag is explicit on every command even though the toolchain is
-already GNU-host. It keeps the target unambiguous, and it is what the pinned
-`gpui` dependency will need.
+Other entry points:
+
+```powershell
+./tools/run.ps1 -BuildOnly   # compile without launching
+./tools/run.ps1 -Gate        # run the full checks first, then launch
+./tools/gate.ps1             # build, test, formatting, lints. Exit 0 = all passed
+```
+
+`tools/gate.ps1` is for checking a change, not for running the app. It always
+asserts the GNU toolchain before doing anything, because a wrong toolchain can
+"pass" while checking the wrong target.
+
+`.cargo/config.toml` pins `build.target`, so a bare `cargo run --bin orca` lands
+in the same target directory as the gate. That is deliberate: when the two used
+different directories, a stale binary was run for hours while fixes appeared to do
+nothing.
 
 ## Workspace layout
 

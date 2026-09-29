@@ -18,3 +18,6 @@ crates/orca-probe/run*.png
 # resolve is not reproducible by default.
 #
 # Do not add `/Cargo.lock` to this file.
+
+# tools/run.ps1 writes the launcher's output here.
+/run.log

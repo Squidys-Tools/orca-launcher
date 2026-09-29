@@ -17,23 +17,20 @@ the log lines quoted below exist precisely so a failure has an unambiguous cause
 ## How to run
 
 ```powershell
-./tools/gate.ps1                    # must be green first
-cargo run --bin orca 2>&1 | Tee-Object run.log
+./tools/run.ps1     # build, launch, and save the log to run.log
 ```
+
+That is the whole thing. It picks the right toolchain, stops any orca already
+running, builds, and tees the output to `run.log`. **You do not need the gate to
+run it.** The gate (`./tools/gate.ps1`) runs tests, formatting and lints; it is
+for checking a change, not for launching, and I run it before handing work over.
 
 `run.log` matters. Every lifecycle decision below is logged, so most of these
 checks are answerable by reading it rather than by guessing from the screen.
 
-> **Always run it exactly like that.** `cargo run` without `--target` used to
-> build into `target/debug` while the gate built into
-> `target/x86_64-pc-windows-gnu/debug` — two separate caches. A binary built
-> from the stale one was run for hours while fixes appeared to do nothing,
-> because the code under test was two days old. `.cargo/config.toml` now pins
-> the target for both, so they cannot diverge again.
->
-> Tell-tale: if cargo prints `Finished` in well under a second with no
-> `Compiling` lines, it did not rebuild. Run the gate and use the binary it
-> produces.
+> If the build prints no `Compiling` lines and finishes instantly, nothing was
+> rebuilt and the binary may be stale. That is a bug, not a fast build — say so
+> rather than trusting the result.
 
 Startup must log, in roughly this order:
 
