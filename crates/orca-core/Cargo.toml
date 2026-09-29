@@ -1,0 +1,21 @@
+[package]
+name = "orca-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# DEPENDENCY RULE — DO NOT ADD DEPENDENCIES WITHOUT READING docs/ARCHITECTURE.md
+#
+# This crate is the pure-logic half of orca. It must not depend on:
+#
+#   * gpui / gpui_platform  — UI state must not leak into domain logic, or the
+#                             ranking and provider code becomes untestable
+#                             without standing up a GPU surface.
+#   * windows / windows-sys / winapi — anything that binds Win32. Platform
+#                             integration lives in orca-win.
+#
+# The list below is empty and that is the enforced state, verified with:
+#
+#   cargo tree -p orca-core --target x86_64-pc-windows-gnu
+#
+[dependencies]

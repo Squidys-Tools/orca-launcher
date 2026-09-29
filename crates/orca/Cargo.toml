@@ -1,0 +1,18 @@
+[package]
+name = "orca"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orca"
+path = "src/main.rs"
+
+# Depends on both halves of the workspace. Does NOT depend on gpui yet — see
+# docs/ARCHITECTURE.md, "Adding GPUI later". Keeping the UI dependency out of
+# the initial commit is what makes `cargo build` and `cargo test` finish in
+# seconds instead of pulling ~7 minutes of dependency resolution and ~10
+# minutes of compilation.
+[dependencies]
+orca-core = { path = "../orca-core" }
+orca-win = { path = "../orca-win" }

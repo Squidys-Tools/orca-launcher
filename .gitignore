@@ -1,0 +1,20 @@
+# Build output for all workspace members.
+/target
+
+# Probe harness run artifacts: logs, screenshots, pid files. The harness writes
+# these next to itself; none of it belongs in history.
+crates/orca-probe/run*.log
+crates/orca-probe/run*.err
+crates/orca-probe/run*.pid
+crates/orca-probe/run*.png
+
+# Cargo.lock policy: COMMITTED, on purpose.
+#
+# `cargo` treats this repo as an *application* workspace (three binaries/libs
+# that ship as one program, not a library published to crates.io), and the
+# guidance for applications is to commit the lockfile. Committing it pins the
+# transitive dependency set, which matters far more than usual here: the GPUI
+# dependency is a git pin into Zed's `main`-adjacent history, so an unpinned
+# resolve is not reproducible by default.
+#
+# Do not add `/Cargo.lock` to this file.

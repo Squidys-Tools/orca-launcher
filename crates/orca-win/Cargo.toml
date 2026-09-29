@@ -1,0 +1,16 @@
+[package]
+name = "orca-win"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Windows platform integration: global hotkey, single-instance, autostart,
+# tray, window enumeration.
+#
+# This crate must never depend on `gpui`. It may depend on `windows`/`windows-sys`
+# (not yet) and on `orca-core`, but the dependency direction is one-way:
+# orca-core knows nothing about this crate.
+#
+# It currently has zero dependencies because none of the Win32 behaviour is
+# implemented yet — only the seams are.
+[dependencies]

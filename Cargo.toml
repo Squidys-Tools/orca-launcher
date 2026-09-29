@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/orca-core",
+    "crates/orca-win",
+    "crates/orca",
+    "crates/orca-probe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+# The GPUI pin lives here, in one place, so an upstream break is a single-line
+# change plus a `cargo update -p gpui`.
+#
+# `bcf6582` resolves to bcf6582ce3500df93a8a39366640173e6786cea6. The full SHA
+# has been mis-transcribed at least once, so only the abbreviated rev is safe
+# to copy by hand. To check it: git ls-remote https://github.com/zed-industries/zed bcf6582
+gpui          = { git = "https://github.com/zed-industries/zed", rev = "bcf6582" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "bcf6582" }
+async-channel = "2"
+windows       = { version = "0.62" }
+
+# Debug info level. Lives here, not in a member manifest: cargo silently ignores
+# a [profile] in a non-root package, and warns about it.
+[profile.dev]
+debug = 1

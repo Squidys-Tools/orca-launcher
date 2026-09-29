@@ -1,0 +1,23 @@
+[package]
+name = "orca-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Windows launcher feasibility probe: global hotkey, focused text input, popup lifecycle."
+
+# A prototype, not a shipped component. It exists to answer the questions that
+# block `orca`'s architecture, and to give us automated proof that the Win32
+# behaviour works on this machine. Nothing in the release build depends on it.
+#
+# It is a workspace member (not an independent lockfile) so the expensive GPUI
+# dependency graph is shared with the real crates instead of being built twice.
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+async-channel.workspace = true
