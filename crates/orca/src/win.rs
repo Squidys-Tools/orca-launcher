@@ -1,7 +1,7 @@
-//! The four Win32 calls the composition root needs that `orca-win` does not
+//! The five Win32 calls the composition root needs that `orca-win` does not
 //! expose, and one pure function that decides which monitor a point is on.
 //!
-//! # Why this file exists, and why it is four functions
+//! # Why this file exists, and why it is five functions
 //!
 //! `docs/ARCHITECTURE.md` rule 3 says `orca-win` is the only place Win32 is
 //! called, and this file breaks that rule. It is a deliberate, itemised
@@ -13,8 +13,9 @@
 //! | [`set_shown`] | `Window::hide` / `Window::show` | the persistent-window design; see below |
 //! | [`move_to`] | `Window::set_position` | a retained window must follow the cursor to another monitor |
 //! | [`logical_cursor`] | a cursor-position read | "centre on the cursor's monitor" is the placement rule |
+//! | [`round_corners`] | `DWMWA_WINDOW_CORNER_PREFERENCE` | see "Rounded corners" below |
 //!
-//! The correct home for all four is `orca-win`, which was already merged and is
+//! The correct home for all five is `orca-win`, which was already merged and is
 //! not being edited. When it is next opened, they move there verbatim and this
 //! file disappears. Until then they are here, in one file, with no other
 //! `unsafe` in the crate, so the exception is reviewable in one sitting.
@@ -56,6 +57,32 @@
 //!
 //! The interesting half — which display contains a point — is
 //! [`display_containing`], which is pure and tested.
+//!
+//! # Rounded corners
+//!
+//! The panel's corners are rounded by [`crate::ui`] painting a rounded rect on
+//! a window that is transparent outside it, *not* by this function. That is the
+//! better mechanism, and the reason is worth writing down because DWM's
+//! attribute looks like the obvious answer first:
+//!
+//! * `DWMWA_WINDOW_CORNER_PREFERENCE` is Windows 11 only, offers only a few
+//!   radii (8px, 4px, none), and rounds the *window*. The panel wants about
+//!   20px, and the window is deliberately larger than the panel so the drop
+//!   shadow has somewhere to live — so DWM would round the outside edge of the
+//!   shadow, which is the one edge that has to stay square.
+//! * It only reaches windows DWM redirects, and `gpui_windows` sets
+//!   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
+//!   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set — in
+//!   which case the window is composited by DComp and DWM leaves it alone.
+//!
+//! Painting the radius has neither problem: identical on Windows 10 and 11, any
+//! radius, antialiased. It does require a window that is genuinely transparent
+//! outside the panel, which is one enum value in `WindowOptions` rather than a
+//! call.
+//!
+//! This function therefore *suppresses* the DWM rounding rather than asking for
+//! it, so a Windows 11 build cannot quietly round the window's outer edge and
+//! clip the shadow the panel is floating on.
 
 use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
@@ -63,6 +90,10 @@ use orca_core::LaunchTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWM_WINDOW_CORNER_PREFERENCE,
+};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -176,6 +207,36 @@ pub fn activate(hwnd: HWND) -> bool {
         return false;
     }
     orca_win::is_foreground(handle)
+}
+
+/// Stops DWM from rounding the window's own corners.
+///
+/// The panel rounds itself; see the module docs for why. This exists so that
+/// the one edge which must stay square — the outside of the drop shadow — stays
+/// square on Windows 11, where DWM rounds frameless top-level windows by
+/// default.
+///
+/// Reports whether Windows accepted the request. `false` is not a failure to
+/// act on: the attribute is Windows 11 build 22000 and later, and on anything
+/// older there is nothing to suppress, so the correct behaviour is to carry on.
+/// It is returned so the caller can put the one number in the log that says
+/// which path the corners are actually taking.
+pub fn round_corners(hwnd: HWND) -> bool {
+    let preference = DWM_WINDOW_CORNER_PREFERENCE(DWMWCP_DONOTROUND.0);
+    // SAFETY: `hwnd` is a live window handle this process owns. The attribute
+    // takes a pointer to exactly `size_of::<DWM_WINDOW_CORNER_PREFERENCE>()`
+    // bytes of live, correctly aligned, initialised local storage, which is
+    // what is passed. The call only sets a rendering hint and has no effect on
+    // window state if it fails.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&preference as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+    }
+    .is_ok()
 }
 
 /// Whether a window is currently visible, ignoring whether it is in front.

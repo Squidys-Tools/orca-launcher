@@ -39,7 +39,7 @@ app is meant to start and stay usable with the hotkey, the tray, the catalogue,
 or the history database all missing. If one of those is the *only* way to reach
 the popup, that is a bug.
 
-## 1. The retained window — the highest-risk thing in this change
+## 1. The retained window — the foundation the rest of this sits on
 
 ### 1a. Reopening after Esc — please read the log, not just the screen
 
@@ -175,7 +175,129 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
-## 2. Latency, now that the window is retained
+## 2. The frame: blur, rounded corners, and a floating panel
+
+**This is the highest-risk change in the project right now, because the gate
+cannot see any of it.** Everything below is one boolean, set once, at window
+creation, and it decides whether the launcher looks like the reference or looks
+like a black rectangle. Nothing in the test suite can observe it.
+
+The mechanism, in one sentence: the window is **transparent** and **larger than
+the panel**, and the panel is a rounded rect painted inside it. If the
+transparency does not composite, the margin around the panel is black and the
+launcher is worse-looking than before this change.
+
+### 2a. Is the margin around the panel actually see-through?
+
+1. Start the launcher, press <kbd>Ctrl+Alt+Space</kbd>.
+2. **Expected:** a rounded dark panel with a soft shadow under it, floating over
+   whatever is behind it. Around the panel — roughly 32px on every side — you
+   see the **desktop**, not black.
+
+The failure to look for: a **black square** the size of the whole window, with
+the panel drawn inside it. That means the swap chain's alpha is being ignored
+and the clear colour reached the screen. Say so in the report; the fix is one
+enum value in `main.rs` (`WindowOptions::window_background`) and it is a design
+decision, not a bug hunt.
+
+To get a proper read, put something with hard edges and high contrast behind the
+launcher first — a browser window with white and black areas, or the desktop
+wallpaper. A flat-coloured background hides a compositing failure completely.
+
+### 2b. Rounded corners
+
+- [ ] The panel's four corners are rounded, with a radius of roughly 16px. The
+      radius must be **visibly larger** than the radius on the selected row
+      inside it; if they look the same, the panel is not rounding.
+- [ ] The **outer** edge of the window is square. A rounded outer edge means DWM
+      is rounding the window and clipping the shadow, which `win::round_corners`
+      exists to prevent. Check the log for
+      `DWM corner rounding suppressed=true`; if it says `false` on Windows 11,
+      that attribute was rejected and DWM's preference is whatever it defaults
+      to.
+- [ ] Repeat at 125% and 150% scaling. A radius is in logical pixels, so it
+      should look the same physical size; if it looks chunky at 150%, the radius
+      is being applied in physical pixels somewhere.
+
+### 2c. The shadow
+
+- [ ] The panel casts a soft shadow, and the shadow is **not cut off** at the
+      window edge. This is what `ui::FRAME_MARGIN` is for; a hard straight edge
+      in the shadow means the margin is too small for the blur.
+- [ ] The shadow looks like two layers — a tight contact shadow and a wide soft
+      one — rather than one uniform grey halo. If it is a single flat ring, only
+      one of `Theme::panel_shadows`' two entries is being applied.
+
+### 2d. The blur behind the panel
+
+**Read this one carefully, because the honest position is that it may not work.**
+
+The panel is translucent, so the desktop shows through it. Whether what shows
+through is *blurred* depends on the OS applying a backdrop material, and that is
+**not** something this code can guarantee:
+
+- `gpui` exposes `WindowBackgroundAppearance::{Transparent, Blurred,
+  MicaBackdrop, MicaAltBackdrop}` and `gpui_windows` implements all of them via
+  DWM. The launcher deliberately uses **`Transparent`**, not `Blurred`, because
+  the window is larger than the panel and a backdrop material would fill the
+  whole window — including the margin where the shadow is — turning the rounded
+  panel into a rounded *square*.
+- Blur-behind is applied by DWM to windows it **redirects**. `gpui_windows` sets
+  `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is on, which is the
+  default (it is off only when the `DISABLE_DIRECT_COMPOSITION` environment
+  variable is set). DComp-composited windows are not redirected, so a backdrop
+  material may do nothing at all.
+
+So there are two acceptable outcomes and one not:
+
+| What you see | Verdict |
+|---|---|
+| Desktop visible through the panel, blurred | Best case. |
+| Desktop visible through the panel, sharp | **Acceptable.** This is the expected outcome, and the panel still reads as translucent. |
+| Panel is flat dark, nothing of the desktop visible | Panel alpha is too high, or the theme is wrong. Report it. |
+| Black square | Compositing failure — see 2a. |
+
+Getting a *real* blur would need either a second GPUI window (which fights the
+retained-window design and the foreground-activation work in
+`ARCHITECTURE.md`), or capturing the desktop ourselves and blurring it, which
+adds a screen capture to every show. Neither is built. If the sharp version is
+not acceptable, say so and it is a design conversation, not a bug.
+
+### 2e. The rest of the frame
+
+- [ ] The search field has a magnifier at the left and the placeholder reads
+      *Search for apps and commands…*. The magnifier is an inline SVG that
+      `gpui` rasterises into an **alpha mask** and tints with `Theme::dim`, so it
+      should be a flat dim grey. If it is a black blob or a missing-glyph box,
+      the SVG failed to parse — check the string constant `ui::MAGNIFIER`.
+- [ ] **Typing still works.** The `.track_focus(&focus)` call moved with the
+      restyle onto the search field's row, which is the nearest ancestor of the
+      input element. If it is ever left off that row, characters are dropped
+      with no error anywhere. This regression is silent, so type after every
+      layout change to that row.
+- [ ] Each row shows the source name on the **right** (`Application`, `File`,
+      …) and the title on the left. The old left-hand gutter tag (`app`, `file`)
+      is gone; that space went to the title.
+- [ ] The footer has two pills on the right, *Open · Enter* and *Hide · Esc*.
+      Both name bindings that exist. When nothing is selected the *Open* pill is
+      dimmed to 45% but does **not** change width — a reflowing footer twitches
+      on every arrow key.
+- [ ] The status line and the `paint N ms` readout are still present on the
+      **left** of the footer. Section 4 below depends on them, so if you removed
+      them, put them back.
+
+### 2f. The frame on a small display
+
+The window is 724×494 logical pixels, chosen so it fits a 1366×768 display at
+150% scaling (910×512 logical) — the tightest case still in use. A test asserts
+this, but the test cannot see what Windows does when a window is too big: it is
+**clamped to the work area**, which crops the panel rather than failing.
+
+- [ ] At 150% scaling on a 768-tall display: the whole panel is visible,
+      including the footer. If the footer is cut off, the height budget in
+      `ui::POPUP_HEIGHT` is over.
+
+## 4. Latency, now that the window is retained
 
 The old create-and-destroy design measured 260–820 ms hotkey-to-first-paint,
 most cycles near 700 ms. That number is the baseline this change is supposed to
@@ -197,7 +319,7 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
 3. `paint --` means no measurement was taken, i.e. no `paint` ran after the
    hotkey armed the telemetry. That is a bug in itself.
 
-## 3. Memory
+## 5. Memory
 
 Previously observed 73 → 95 MB across ten create/destroy cycles, settling near
 88 MB. That was the *destroying* design, so it says almost nothing about the
@@ -211,7 +333,7 @@ retained one.
    moving. Take three readings a minute apart in the last five minutes — if they
    are still trending up, that is a leak and it is worth finding.
 
-## 4. Text input: the UTF-8 / UTF-16 caret
+## 6. Text input: the UTF-8 / UTF-16 caret
 
 `Window::handle_input` and every `EntityInputHandler` method speak **UTF-16 code
 units**. The model — `query` and `caret` — is a Rust `String` and a `usize`, so
@@ -261,7 +383,7 @@ Any caret in the wrong place after non-ASCII input is the UTF-8/UTF-16 mismatch,
 not a rendering bug, and it is worth a bug report with the exact character
 sequence that triggered it.
 
-## 5. The popup paints before results arrive
+## 7. The popup paints before results arrive
 
 Collection enumerates the Start Menu, opens a COM apartment, reads registry keys,
 walks directory trees, and reads SQLite. That runs on a `BackgroundExecutor` via
@@ -284,7 +406,7 @@ structural property (there is no code path from `render` to the filesystem) but
 - [ ] Esc, then reopen, and re-type the same query. **Expected:** identical row
       order (determinism). A reshuffle under the cursor is a bug.
 
-## 6. Ranking feel
+## 8. Ranking feel
 
 Unit-tested and green, but every weight is a product judgement that has never
 been judged by a person looking at a list.
@@ -304,7 +426,7 @@ been judged by a person looking at a list.
 - [ ] Check the status line wording: `3 matches` vs `50 of 400 matches` should
       read differently, and `searching...` should not stick once results land.
 
-## 7. Display, DPI, and multiple monitors
+## 9. Display, DPI, and multiple monitors
 
 The cursor-monitor lookup converts Win32 **physical** pixels to GPUI **logical**
 pixels using that monitor's effective DPI, because `PlatformDisplay::bounds()` is
@@ -325,7 +447,7 @@ it because the conversion depends on the real display configuration.
       reposition is not running.
 - [ ] Check the popup is exactly 640 logical px wide.
 
-## 8. `orca-win` platform calls
+## 10. `orca-win` platform calls
 
 Implemented and unit-tested, but the tests stop at the seam. A fake cannot prove
 Windows does the thing.
@@ -361,16 +483,18 @@ Windows does the thing.
       **and** something from App Paths, and must not stall the popup (it runs on
       the background executor).
 
-## 9. What the gate covers, and what it cannot
+## 11. What the gate covers, and what it cannot
 
 So you do not have to re-derive this:
 
-| Covered by the gate (395 tests, clippy `-D warnings`) | Not covered |
+| Covered by the gate (404 tests, clippy `-D warnings`) | Not covered |
 |---|---|
 | Every UTF-16 ⇄ UTF-8 conversion, over six sample strings at every index | Whether Win32 and the IME send those indices |
-| The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results land |
+| The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results arrive |
 | Backspace/delete at every caret position of every sample | Whether the window is really retained, or merely logged as such |
 | The hide decision table (`hide_plan`) | Whether `ShowWindow(SW_HIDE)` hands focus back |
+| **Panel contrast, composited over both a white and a black backdrop** | **Whether the window composites alpha at all — see section 2a** |
+| **The window fits the smallest supported display** | **Whether the corners, the shadow, and the blur look right** |
 | `InstalledApp` → `RawResult` field-for-field | Whether `installed_apps()` returns a good list on *your* machine |
 | The `DirectoryLister` against the real filesystem | Whether the popup is on the right monitor at your DPI |
 | Argument quoting, `PATH` resolution, hotkey spec parsing | Anything about latency, memory, or feel |
@@ -383,7 +507,7 @@ feature, which enables the Wayland and X11 backends. That is why the risky logic
 was moved out of the trait methods into the pure functions in
 `crates/orca/src/text.rs` and the pure `hide_plan` — so it could be tested at
 all. The thin GPUI adapters left behind are therefore unverified by
-construction, and section 1 and section 4 above are where you check them.
+construction, and section 1 and section 6 above are where you check them.
 
 ## Not built yet
 
@@ -397,7 +521,27 @@ So nobody assumes otherwise:
 - **No result icons, no fuzzy-match tuning UI, no config file of your own.**
   `[files]` and `[commands]` come from `config.toml`; the launcher falls back to
   defaults with a `config.toml … unavailable` line if it cannot read one.
-- **A real `Ctrl+A`.** See section 4.
+- **A real `Ctrl+A`.** See section 6.
+- **A real backdrop blur.** The panel is translucent and the desktop shows
+  through it, but it is not *blurred* — see section 2d for why a DWM backdrop
+  material cannot be used here without filling the shadow margin.
+- **No section headers and no favourites.** The reference groups rows under
+  "Favorites" / "Applications". Grouping by `Source` was left out on purpose:
+  the ranked list interleaves sources, so contiguous-run grouping would produce
+  a dozen one-row headers, and grouping *all* rows by source would silently
+  re-order the list against the frecency ranking the policy is built on. The
+  right-hand per-row source label carries the same information without
+  reordering anything.
+- **No app icons, and therefore no shortcut chips.** `crates/orca-win/src/apps.rs`
+  is explicit that it is not an icon loader. The chips in the reference are
+  trivial to draw and useless without a shortcut registry, and no binding
+  exists for them yet, so neither is drawn — a chip advertising a shortcut
+  nothing handles is worse than no chip.
+- **No actions menu.** `Ctrl+K` is not bound, and gpui at this pin has no
+  `popover` element (`anchored()` only) with `ContextMenu` living in Zed's `ui`
+  crate, which is not in the graph. The footer advertises *Open* and *Hide*
+  only, because those bindings exist.
 - **The four Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
   itemised, documented exception to the layering rule, quarantined in one file
-  with the only `unsafe` in the crate, pending that crate being reopened.
+  with the only `unsafe` in the crate, pending that crate being reopened. There
+  is now a fifth (`DwmSetWindowAttribute`, added for the frame).

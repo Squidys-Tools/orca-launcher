@@ -68,7 +68,7 @@ use orca_win::{
 
 use crate::catalog::{Catalog, Engine};
 use crate::providers::StdFsDirectory;
-use crate::ui::{HideAction, Launcher, LauncherView, Telemetry, POPUP_HEIGHT, POPUP_WIDTH};
+use crate::ui::{HideAction, Launcher, LauncherView, Telemetry, WINDOW_HEIGHT, WINDOW_WIDTH};
 
 /// Tray command: show the popup.
 const TRAY_SHOW: &str = "show";
@@ -493,7 +493,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     let create = cx.update(|app| {
         let entity = launcher.clone();
         let display = win::display_under_cursor(app);
-        let bounds = Bounds::centered(display, size(px(POPUP_WIDTH), px(POPUP_HEIGHT)), app);
+        let bounds = Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app);
 
         app.open_window(
             WindowOptions {
@@ -504,7 +504,13 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 is_resizable: false,
                 is_minimizable: false,
                 is_movable: false,
-                window_background: WindowBackgroundAppearance::Opaque,
+                // The load-bearing line for the whole look. `gpui_windows`
+                // clears the render target to `[0, 0, 0, 0]` for every
+                // non-opaque appearance and presents through a
+                // `DXGI_ALPHA_MODE_PREMULTIPLIED` Direct Composition swap
+                // chain, so the shadow margin around the panel is genuinely
+                // see-through instead of black. See `ui`'s module docs.
+                window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
             },
             // Deliberately named `cx`: see the doc comment above.
@@ -524,6 +530,17 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     place_on_cursor(window, cx);
                     window.focus(&focus, cx);
                     window.activate_window();
+                    // Suppress, not request, DWM's corner rounding: the panel
+                    // rounds itself, and on Windows 11 the window's outer edge
+                    // is the outside of the drop shadow. Logged because it is
+                    // the one number that says whether the OS is rounding
+                    // anything, and a human has to look at the screen to say
+                    // whether the corners came out right.
+                    let unrounded = handle.is_some_and(win::round_corners);
+                    log(&format!(
+                        "popup: corners are painted by the panel; \
+                         DWM corner rounding suppressed={unrounded}"
+                    ));
                     handle
                 })
                 .unwrap_or(None);
@@ -638,7 +655,7 @@ fn spawn_command_pump(
 /// is recoverable and one that was never placed is not.
 fn place_on_cursor(window: &mut Window, app: &App) {
     let display = win::display_under_cursor(app);
-    let target = Bounds::centered(display, size(px(POPUP_WIDTH), px(POPUP_HEIGHT)), app);
+    let target = Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app);
     if let Some(hwnd) = win::hwnd(window) {
         win::move_to(hwnd, target.origin.x.as_f32(), target.origin.y.as_f32());
     }
@@ -663,7 +680,11 @@ mod tests {
     use orca_core::config::HotkeySpec;
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
 
-    use super::{spawn_command_pump, UiCommand, POPUP_HEIGHT, POPUP_WIDTH};
+    use super::{spawn_command_pump, UiCommand, WINDOW_HEIGHT, WINDOW_WIDTH};
+    // The panel dimensions and the margin are not used outside this module, so
+    // they are imported here rather than at the crate root where they would be
+    // dead code in the binary.
+    use crate::ui::{FRAME_MARGIN, POPUP_HEIGHT, POPUP_WIDTH};
 
     #[test]
     fn the_command_pump_keeps_draining_across_a_long_idle_period() {
@@ -826,13 +847,37 @@ mod tests {
     }
 
     #[test]
-    fn the_popup_is_sized_the_way_the_brief_asks() {
-        // 640 wide, as specified, and tall enough to be a launcher rather than
-        // a one-line search box.
-        assert_eq!(POPUP_WIDTH, 640.0);
+    fn the_window_is_the_panel_plus_a_shadow_margin() {
+        // The panel is 660 wide, and the window is that plus 32px of transparent
+        // margin on each side. The margin is not padding: the widest shadow
+        // blur is 56px, so a window sized to the panel would clip its own
+        // shadow into a hard rectangle. See `ui::FRAME_MARGIN`.
+        assert_eq!(POPUP_WIDTH, 660.0);
+        assert_eq!(WINDOW_WIDTH, POPUP_WIDTH + FRAME_MARGIN * 2.0);
+        assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT + FRAME_MARGIN * 2.0);
+    }
+
+    /// The tightest display the launcher claims to work on: a 1366×768 laptop
+    /// at 150% scaling, which is 910×512 *logical* pixels.
+    const SMALLEST_DISPLAY: (f32, f32) = (1366.0 / 1.5, 768.0 / 1.5);
+
+    #[test]
+    fn the_window_fits_the_smallest_display_we_support() {
+        // The failure this guards against is quiet: the panel alone was a
+        // sensible size, and only overflowed once the shadow margin was added
+        // on all four sides. Windows then clamps the window to the work area,
+        // which crops the panel rather than failing, so the launcher looks
+        // subtly wrong on exactly the machines least able to spare the pixels.
+        let (width, height) = SMALLEST_DISPLAY;
         assert!(
-            (300.0..=900.0).contains(&POPUP_HEIGHT),
-            "POPUP_HEIGHT {POPUP_HEIGHT} is not a sensible launcher height"
+            WINDOW_WIDTH <= width,
+            "the window is {WINDOW_WIDTH} logical px wide, more than the {width} \
+             available on a 1366-wide display at 150% scaling"
+        );
+        assert!(
+            WINDOW_HEIGHT <= height,
+            "the window is {WINDOW_HEIGHT} logical px tall, more than the {height} \
+             available on a 768-tall display at 150% scaling"
         );
     }
 }

@@ -284,9 +284,10 @@ each item names the gap it fills:
 | `SetWindowPos` | `Window::set_position` does not exist |
 | `GetCursorPos` + `MonitorFromPoint` + `GetDpiForMonitor` | "centre on the cursor's monitor" needs a cursor read |
 | `ShellExecuteW` | neither crate opens a `LaunchTarget` |
+| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would clip the panel's drop shadow |
 
-Five functions, in one file, the only `unsafe` in the crate, each with the gap
-named above it. The right home for all five is `orca-win`, which was already
+Six functions, in one file, the only `unsafe` in the crate, each with the gap
+named above it. The right home for all six is `orca-win`, which was already
 merged and not being edited. **When `orca-win` is next opened they move there
 verbatim and the file disappears.** The interesting half — which display
 contains a point — is a pure function and is tested.
@@ -421,6 +422,98 @@ a `Send` future, and any future holding a GPUI type is `!Send`, because
 **The general rule:** anything that must run while the app is *idle* — tray
 polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
 live on the foreground executor. It is not a slow path, it is a dead one.
+
+## The window is transparent, and larger than the panel
+
+The popup is a rounded panel floating over the desktop rather than a window with
+a title bar, and three separate decisions have to hold for that to come out
+right. All three are in `crates/orca/src/ui.rs` and `main.rs`; recording them
+because each one is a plausible-looking thing to "simplify" back.
+
+**The window is bigger than the panel, on all four sides, by
+`ui::FRAME_MARGIN`.** Not decoration. The widest shadow in
+`Theme::panel_shadows` is a 56px blur offset 24px down, and a window sized to
+the panel clips its own shadow into a hard straight-edged rectangle. The
+consequence is that every placement calculation — `Bounds::centered`,
+`place_on_cursor`, the `rect=` in the show log — is in *window* coordinates, not
+panel coordinates, and the panel is centred inside it.
+
+**`WindowOptions::window_background` is `Transparent`, and the root view is not
+painted.** `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
+non-`Opaque` appearance and presents through a `DXGI_ALPHA_MODE_PREMULTIPLIED`
+Direct Composition swap chain, so scene pixels that were not painted are
+genuinely transparent. One side effect worth knowing: `Window::should_use_subpixel_rendering`
+returns `false` for any non-opaque appearance, so the query text is grayscale-antialiased
+inside the panel and on an opaque background.
+
+### Rounded corners: painted, not delegated to DWM
+
+`DWMWA_WINDOW_CORNER_PREFERENCE` looks like the answer and is not:
+
+* it is Windows 11 build 22000 and later, with a small set of radii (8px, 4px,
+  none) and no 16–20px option, which is what this design wants;
+* it rounds the **window**, and the window is deliberately larger than the panel,
+  so DWM would round the outside edge of the drop shadow — the one edge that has
+  to stay square;
+* it only reaches windows DWM redirects, and `gpui_windows` sets
+  `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled (the
+  default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set), in which
+  case DComp composites the window and DWM leaves it alone.
+
+Painting the radius has none of those constraints and is antialiased. The
+remaining Win32 call, `win::round_corners`, therefore *suppresses* the DWM
+preference (`DWMWCP_DONOTROUND`) rather than requesting one, so a Windows 11
+build cannot quietly reintroduce the clipped-shadow failure. It logs whether
+Windows accepted it, because that number is the only thing in the log that says
+which path the corners are taking.
+
+### Why there is no backdrop blur, and what "blurred" would cost
+
+`gpui` exposes `WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop,
+MicaAltBackdrop}` and `gpui_windows` implements all four through DWM
+(`set_window_composition_attribute`, `dwm_set_window_composition_attribute`).
+None of them is used here, and the reason is specific rather than cautious:
+`Blurred` and the Mica variants apply their material to the **whole window
+rectangle**. The window is larger than the panel, so the material would fill the
+shadow margin too and turn the rounded panel into a rounded *square* — a worse
+outcome than no material at all.
+
+So the panel is genuinely translucent and the desktop shows through sharp. Two
+routes to an actual blur, both rejected for now:
+
+* a second GPUI window behind the panel carrying a backdrop material. This
+  fights the retained-window design and the synchronous foreground activation
+  recorded above; two windows means two z-order and two activation problems.
+* capture the desktop region behind the popup, blur it, and paint it inside the
+  panel. This works, and it is self-contained, but it puts a screen capture on
+  every show, which is exactly the latency the retained window exists to
+  remove, and the capture has to happen while the window is still hidden or it
+  photographs itself.
+
+Neither is a bug. It is a product decision that has not been made yet, and
+`docs/MANUAL-CHECKS.md` section 2d records sharp-translucent as an acceptable
+outcome rather than a defect.
+
+### The panel is translucent, so contrast has to be composited
+
+Every fill in the palette except the text colours now carries an alpha, because
+they are painted over the desktop rather than over each other. A contrast check
+against the fill's own RGB is then meaningless — `rgba(10, 10, 13, 0.88)` over a
+white wallpaper is a mid grey, not black — so `theme.rs`'s tests carry their own
+source-over and assert every pairing against the *worst* of a white and a black
+backdrop.
+
+The subtlety that cost a test: a selection highlight does not sit on the
+desktop, it sits on the panel, so it has to be composited over the panel over
+the backdrop. Compositing a 10%-white highlight directly over a white
+wallpaper scores it at 1.00:1 and produces a failing test that describes
+nothing the user would ever see. It is the strongest argument in this file for
+testing against the real compositing chain rather than against the constants
+that feed it.
+
+The panel's alpha is bounded from both sides by that same test: too opaque and
+the translucency is gone, too transparent and `dim` stops clearing 4.5:1 over a
+light wallpaper. That is why `Theme::DARK.background.a` is 0.88 and not 0.8.
 
 ## `Window::activate_window` is asynchronous, and that matters
 

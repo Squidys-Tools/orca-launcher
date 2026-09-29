@@ -1,4 +1,24 @@
-//! The popup: a query bar, a result list, and a status line.
+//! The popup: a floating rounded panel over the desktop, a query field, a
+//! result list, and a status line.
+//!
+//! # The frame
+//!
+//! The window is **larger than the panel** and transparent outside it. That one
+//! decision is what makes the launcher look like the thing it is imitating
+//! rather than like a dialog, and it is load-bearing in three places:
+//!
+//! * `WindowOptions::window_background` is [`WindowBackgroundAppearance::Transparent`].
+//!   `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
+//!   non-opaque appearance and presents through a `DXGI_ALPHA_MODE_PREMULTIPLIED`
+//!   Direct Composition swap chain, so anything the scene does not paint is
+//!   genuinely see-through rather than black.
+//! * The panel is a rounded rect inset by [`FRAME_MARGIN`], so the corners are
+//!   rounded *by the paint* and the margin is where the drop shadow lives. The
+//!   alternative — `DWMWA_WINDOW_CORNER_PREFERENCE` — is Windows 11 only, has
+//!   no radius worth having, and would round the outside of the shadow. See
+//!   `win.rs`.
+//! * Because the window is transparent, the panel's fill has to carry its own
+//!   alpha, which is why [`crate::theme`] composites before it checks contrast.
 //!
 //! Everything in this file that looks like GPUI folklore is load-bearing, and
 //! each of the four items below cost a debugging cycle to find. They are
@@ -13,10 +33,11 @@
 //!    a literal no-op on Windows (`gpui_windows/src/platform.rs`, the `activate`
 //!    body is a comment). It compiles, it does nothing, and the popup does not
 //!    take focus.
-//! 3. **`.track_focus(&focus)` on the dispatch node** that owns the query bar.
+//! 3. **`.track_focus(&focus)` on the dispatch node** that owns the query field.
 //!    Without it the focus handle is not in the dispatch tree, `window.focus()`
 //!    resolves to the window root instead, and typed characters are dropped
-//!    with no error anywhere.
+//!    with no error anywhere. It must stay on the node that *contains* the
+//!    input, which after the restyle is the search field's own row.
 //! 4. **`handle_input` is called from `paint`**, not `prepaint`. Verified in
 //!    `gpui/src/window.rs`; calling it in `prepaint` does nothing at all.
 //!
@@ -37,7 +58,7 @@ use orca_core::ResultItem;
 
 use crate::catalog::{Engine, Generation};
 use crate::text;
-use crate::theme::{source_label, Theme};
+use crate::theme::{source_name, Theme};
 
 actions!(
     orca,
@@ -65,25 +86,71 @@ actions!(
     ]
 );
 
-/// Popup width, in logical pixels.
-pub const POPUP_WIDTH: f32 = 640.0;
-/// Popup height, in logical pixels.
-pub const POPUP_HEIGHT: f32 = 420.0;
+/// The panel's width, in logical pixels, excluding the shadow margin.
+pub const POPUP_WIDTH: f32 = 660.0;
+/// The panel's height, in logical pixels, excluding the shadow margin.
+///
+/// 430 is not a free choice. Windows clamps a window that is larger than the
+/// display, and the tightest display still in use is a 1366×768 laptop at 150%
+/// scaling, which is 512 logical pixels tall. Panel + margin has to fit inside
+/// that with room to spare, which is what caps this number; the row height and
+/// the two fixed bars below spend what is left.
+pub const POPUP_HEIGHT: f32 = 430.0;
+
+/// Transparent margin on every side of the panel, and therefore the difference
+/// between the panel and the window.
+///
+/// Not decoration. The widest shadow in [`crate::theme::Theme::panel_shadows`]
+/// is a 56px blur offset 24px down, so it needs roughly 40px of room before it
+/// reaches the window edge; a window sized to the panel would clip its own
+/// shadow into a hard rectangle, which is the exact artefact the margin exists
+/// to avoid. The window is [`WINDOW_WIDTH`] × [`WINDOW_HEIGHT`].
+pub const FRAME_MARGIN: f32 = 32.0;
+
+/// The window's width: the panel plus [`FRAME_MARGIN`] on both sides.
+pub const WINDOW_WIDTH: f32 = POPUP_WIDTH + FRAME_MARGIN * 2.0;
+/// The window's height: the panel plus [`FRAME_MARGIN`] top and bottom.
+pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT + FRAME_MARGIN * 2.0;
+
+/// The panel's corner radius.
+///
+/// Painted rather than delegated to DWM; see the module docs. Large enough to
+/// read as a floating card and small enough that the footer pills inside it do
+/// not look like they are competing with it.
+const PANEL_RADIUS: f32 = 16.0;
 
 /// One row of the result list.
-const ROW_HEIGHT: f32 = 40.0;
-/// The query bar's height.
-const BAR_HEIGHT: f32 = 56.0;
-/// The status line's height.
-const STATUS_HEIGHT: f32 = 30.0;
-/// Width of the per-row source gutter. Fixed so titles line up.
-const GUTTER_WIDTH: f32 = 44.0;
+const ROW_HEIGHT: f32 = 38.0;
+/// The search field's height. Taller than a row so the query reads as the
+/// panel's subject rather than as another list item.
+const SEARCH_HEIGHT: f32 = 60.0;
+/// The status bar's height.
+const STATUS_HEIGHT: f32 = 44.0;
+/// Height of a footer pill, and of the keycap inside it.
+const PILL_HEIGHT: f32 = 30.0;
+const KEYCAP_HEIGHT: f32 = 20.0;
 
 /// The placeholder shown when the query is empty.
-const PLACEHOLDER: &str = "Type to search";
+const PLACEHOLDER: &str = "Search for apps and commands…";
 
-/// The key hints, shown in the status line in place of the IME indicator.
-const FOOTER_HINT: &str = "up/down move - enter open - esc hide";
+/// The magnifier drawn at the left of the search field.
+///
+/// Inline SVG rather than an asset, and the stroke colour is irrelevant:
+/// `gpui` rasterises an `Svg` built from `data()` into an **alpha mask** and
+/// tints it with the element's text colour (`Svg::paint` →
+/// `Window::paint_svg` → `render_alpha_mask`). So the shape is what this
+/// constant carries and [`crate::theme::Theme::dim`] carries the colour.
+const MAGNIFIER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5 L21 21"/></svg>"##;
+
+/// The keyboard hints in the footer.
+///
+/// Both name bindings that exist. This is the reason there is no "Actions"
+/// pill: there is no actions menu at this GPUI rev, and a pill that advertises
+/// a shortcut nothing handles is worse than no pill.
+const HINT_OPEN: &str = "Open";
+const HINT_HIDE: &str = "Hide";
+const KEY_ENTER: &str = "Enter";
+const KEY_ESC: &str = "Esc";
 
 /// Diagnostics shared with the background threads, and read once per frame.
 ///
@@ -842,6 +909,7 @@ impl Render for LauncherView {
         let searching = self.launcher.read(cx).searching;
         let error = self.launcher.read(cx).error.is_some();
         let status = self.launcher.read(cx).status();
+        let open = self.launcher.read(cx).activated().is_some();
         let latency = self
             .launcher
             .read(cx)
@@ -854,11 +922,15 @@ impl Render for LauncherView {
         let entity = self.launcher.clone();
         let telemetry = self.launcher.read(cx).telemetry.clone();
 
+        // The root is deliberately *not* painted. It is the shadow margin, and
+        // the window behind it is transparent — see the module docs. Giving it
+        // `theme.background` here is the single change that turns the launcher
+        // back into a dialog.
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.background)
+            .p(px(FRAME_MARGIN))
             .text_color(theme.text)
             .on_action(cx.listener(Self::on_hide))
             .on_action(cx.listener(Self::on_previous))
@@ -873,54 +945,159 @@ impl Render for LauncherView {
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .h(px(BAR_HEIGHT))
-                    .border_b_1()
+                    .flex_1()
+                    .flex_col()
+                    .rounded(px(PANEL_RADIUS))
+                    .bg(theme.background)
+                    .border_1()
                     .border_color(theme.border)
-                    .child(div().text_color(theme.accent).child(">")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .h(px(36.))
-                    .items_center()
-                    .px_4()
-                    // Item 3 of the module docs. Without this line the focus
-                    // handle is not in the dispatch tree and typing is dropped.
-                    .track_focus(&focus)
-                    .child(QueryInput {
-                        launcher: entity,
-                        telemetry,
-                    }),
-            )
-            .child(self.result_list(&rows, selected, theme, searching, error))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_4()
-                    .px_4()
-                    .h(px(STATUS_HEIGHT))
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_size(px(11.))
-                    .text_color(if error { theme.accent } else { theme.dim })
-                    .child(SharedString::from(status))
-                    .child(SharedString::from(if composing {
-                        "IME composing"
-                    } else {
-                        FOOTER_HINT
-                    }))
-                    .child(SharedString::from(latency)),
+                    .shadow(theme.panel_shadows())
+                    // Clips the rows to the panel's radius. Without it the
+                    // scrolled list paints square corners over the rounded
+                    // ones at the top and bottom of the list.
+                    .overflow_hidden()
+                    .child(self.search_field(theme, &focus, entity, telemetry))
+                    .child(self.result_list(&rows, selected, theme, searching, error))
+                    .child(Self::status_bar(
+                        status, latency, composing, error, open, theme,
+                    )),
             )
     }
 }
 
 impl LauncherView {
+    /// The query field: a magnifier and the text input, on one row.
+    ///
+    /// This node is also the focus-tracking one. Item 3 of the module docs is
+    /// about *this* element specifically — it is the nearest ancestor of the
+    /// [`QueryInput`], so if the input is ever re-parented this row has to move
+    /// with it or typing stops working with no error anywhere.
+    fn search_field(
+        &mut self,
+        theme: Theme,
+        focus: &FocusHandle,
+        entity: Entity<Launcher>,
+        telemetry: Arc<Telemetry>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .flex_shrink_0()
+            .px_5()
+            .h(px(SEARCH_HEIGHT))
+            .text_size(px(16.))
+            .track_focus(focus)
+            .child(
+                svg()
+                    .data(MAGNIFIER.as_bytes())
+                    .size(px(18.))
+                    .flex_shrink_0()
+                    .text_color(theme.dim),
+            )
+            .child(QueryInput {
+                launcher: entity,
+                telemetry,
+            })
+    }
+
+    /// A footer pill: a label and the key that presses it.
+    ///
+    /// Takes no `&mut self` — it reads no view state — so it is an associated
+    /// function rather than a method. That is not a style preference: `&mut
+    /// self` would borrow the view for the whole build of a leaf that cannot
+    /// possibly want it, and it is called twice in one expression.
+    fn pill(theme: Theme, label: &'static str, key: &'static str) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .h(px(PILL_HEIGHT))
+            .px_3()
+            .rounded(px(8.))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.text)
+                    .child(SharedString::from(label)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(KEYCAP_HEIGHT))
+                    .px_2()
+                    .rounded(px(5.))
+                    .bg(theme.selection)
+                    .text_size(px(10.))
+                    .text_color(theme.dim)
+                    .child(SharedString::from(key)),
+            )
+    }
+
+    /// The status bar: what the search is doing on the left, what the keyboard
+    /// does on the right.
+    ///
+    /// Also reads no view state, and takes its arguments by value because
+    /// `render` already built every one of them as an owned `String` for this
+    /// one call.
+    fn status_bar(
+        status: String,
+        latency: String,
+        composing: bool,
+        error: bool,
+        open: bool,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let left = if composing {
+            "IME composing".to_owned()
+        } else {
+            status
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .flex_shrink_0()
+            .px_4()
+            .h(px(STATUS_HEIGHT))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(11.))
+                    .text_color(if error { theme.accent } else { theme.dim })
+                    .child(SharedString::from(left))
+                    .child(SharedString::from(latency)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    // Dimmed rather than hidden when nothing is selected: the
+                    // pill still names the binding, which is its job, and a
+                    // layout that reflows as the selection moves would make the
+                    // bar twitch on every arrow key.
+                    .opacity(if open { 1.0 } else { 0.45 })
+                    .child(Self::pill(theme, HINT_OPEN, KEY_ENTER))
+                    .child(Self::pill(theme, HINT_HIDE, KEY_ESC)),
+            )
+    }
+
     /// The scrollable result rows.
     fn result_list(
         &mut self,
@@ -941,7 +1118,8 @@ impl LauncherView {
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
-            .p_2();
+            .px_2()
+            .py_2();
 
         if rows.is_empty() {
             let message = if error {
@@ -965,6 +1143,10 @@ impl LauncherView {
 
         list.children(rows.iter().enumerate().map(|(index, row)| {
             let is_selected = index == selected;
+            // The source name sits on the right rather than in a left gutter.
+            // A fixed-width gutter existed to keep titles aligned across rows;
+            // a right-aligned column needs no such reservation, which is where
+            // the ~44px it was holding went — straight into the title.
             div()
                 .flex()
                 .flex_row()
@@ -972,27 +1154,16 @@ impl LauncherView {
                 .gap_3()
                 .px_3()
                 .h(px(ROW_HEIGHT))
-                .rounded(px(6.))
+                .rounded(px(9.))
                 .when(is_selected, |style| style.bg(theme.selection))
                 .child(
                     div()
-                        .w(px(GUTTER_WIDTH))
-                        .flex_shrink_0()
-                        .text_size(px(11.))
-                        .text_color(if is_selected {
-                            theme.on_selection
-                        } else {
-                            theme.dim
-                        })
-                        .child(SharedString::from(source_label(row.item.source))),
-                )
-                .child(
-                    div()
-                        .flex()
+                        .flex_1()
                         .flex_col()
                         .overflow_hidden()
                         .child(
                             div()
+                                .truncate()
                                 .text_size(px(15.))
                                 .text_color(if is_selected {
                                     theme.on_selection
@@ -1010,6 +1181,13 @@ impl LauncherView {
                                     .child(subtitle),
                             )
                         }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .text_color(theme.dim)
+                        .child(SharedString::from(source_name(row.item.source))),
                 )
         }))
     }
