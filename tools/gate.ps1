@@ -32,15 +32,20 @@ $logDir = Join-Path $repo 'target\gate-logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # --- toolchain: the single most important thing in this file -----------------
-# Put the GNU bin dir ahead of everything, and *assert* it, because a silently
-# wrong toolchain is worse than a failing one.
-$gnu = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin"
-if (-not (Test-Path (Join-Path $gnu 'rustc.exe'))) {
-  Write-Host "FATAL: GNU rustc not found at $gnu" -ForegroundColor Red
-  Write-Host "Install it with: rustup toolchain install stable-x86_64-pc-windows-gnu" -ForegroundColor Yellow
+# Put the pinned GNU toolchain ahead of everything, and *assert* it, because a
+# silently wrong toolchain is worse than a failing one: MSVC clippy passes
+# without ever checking the GNU target this project builds for.
+#
+# Located via `rustup which` rather than a hardcoded .rustup path. A hardcoded
+# path is what made this tooling report a correctly-installed toolchain as
+# missing, and tell the user to install a toolchain they already had.
+. (Join-Path $PSScriptRoot 'toolchain.ps1')
+try {
+  $null = Initialize-OrcaToolchain
+} catch {
+  Write-Host "FATAL: $($_.Exception.Message)" -ForegroundColor Red
   exit 2
 }
-$env:PATH = "$gnu;C:\Users\chris\.cargo\bin;" + $env:PATH
 $env:CARGO_TERM_COLOR = 'never'
 $env:CARGO_TERM_PROGRESS_WHEN = 'never'
 $env:RUST_BACKTRACE = '1'

@@ -23,12 +23,20 @@ the way it is.
 ### The PATH caveat — read this before your first build
 
 If PowerShell resolves a standalone MSVC `cargo.exe` before `rustup`'s shim,
-the build fails with confusing linker errors. Prepend the GNU toolchain to
-`PATH` in every shell you build from:
+the build fails with confusing linker errors. The scripts in `tools/` handle this
+by asking `rustup which rustc` where the pinned toolchain actually is and putting
+it first on `PATH`, so you do not need to do anything.
+
+If you want to run cargo by hand, do the same thing:
 
 ```powershell
-$env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
+$env:PATH = (Split-Path (rustup which rustc)) + ";$env:PATH"
 ```
+
+Never hardcode a path like `C:\Users\<you>\.rustup\toolchains\...`. Earlier
+versions of these scripts did, and it made the tooling report a correctly
+installed toolchain as missing and tell the user to install a toolchain they
+already had.
 
 Confirm the GNU toolchain actually won:
 
@@ -42,12 +50,13 @@ rustc -vV   # host: x86_64-pc-windows-gnu
 ./tools/run.ps1
 ```
 
-That is the command you need. It selects the GNU toolchain, stops any copy of
+That is the command you need. It locates the pinned toolchain, stops any copy of
 orca already running, builds, launches, and saves the output to `run.log`. The
 launcher opens no window at startup — it waits for `Ctrl+Shift+Space`, then shows
 a popup. Press that again to hide it.
 
-Other entry points:
+A bare `cargo run --bin orca` is also correct and does the same thing; the script
+adds the log file and the "stop the old process" step. Other entry points:
 
 ```powershell
 ./tools/run.ps1 -BuildOnly   # compile without launching
@@ -55,9 +64,9 @@ Other entry points:
 ./tools/gate.ps1             # build, test, formatting, lints. Exit 0 = all passed
 ```
 
-`tools/gate.ps1` is for checking a change, not for running the app. It always
-asserts the GNU toolchain before doing anything, because a wrong toolchain can
-"pass" while checking the wrong target.
+`tools/gate.ps1` is for checking a change, not for running the app. It asserts the
+GNU toolchain before doing anything, because a wrong toolchain can "pass" while
+checking the wrong target.
 
 `.cargo/config.toml` pins `build.target`, so a bare `cargo run --bin orca` lands
 in the same target directory as the gate. That is deliberate: when the two used

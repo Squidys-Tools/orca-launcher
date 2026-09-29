@@ -58,7 +58,6 @@ public class ProbeNative {
 '@
 }
 
-$script:GnuBin   = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin"
 $script:ProbeDir = $PSScriptRoot
 $script:ProbeExe = Join-Path $PSScriptRoot "..\..\target\x86_64-pc-windows-gnu\debug\orca-probe.exe"
 if (-not (Test-Path $script:ProbeExe)) {
@@ -68,12 +67,15 @@ if (-not (Test-Path $script:ProbeExe)) {
 # Apply the toolchain on dot-source, not only when someone remembers to call
 # Use-GnuPath. A silently-wrong toolchain is the failure mode worth designing
 # away: MSVC clippy "passes" without ever checking our GNU target.
-if ($env:PATH -notlike "*$($script:GnuBin)*") {
-  $env:PATH = "$script:GnuBin;C:\Users\chris\.cargo\bin;" + $env:PATH
-}
+#
+# Located via `rustup which`, never a hardcoded .rustup path.
+. (Join-Path $PSScriptRoot "..\..\tools\toolchain.ps1")
+$script:GnuBin = Initialize-OrcaToolchain
 
+# Kept for callers that call it explicitly. The toolchain is already applied on
+# dot-source above, so this only needs to guarantee it, not rediscover it.
 function Use-GnuPath {
-  $env:PATH = "$script:GnuBin;C:\Users\chris\.cargo\bin;" + $env:PATH
+  $env:PATH = "$script:GnuBin;$env:PATH"
 }
 
 function Stop-Probe {

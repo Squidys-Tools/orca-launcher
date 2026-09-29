@@ -7,14 +7,31 @@ mistakes here are both silent: a wrong toolchain, and a truncated error.
 
 This project targets `x86_64-pc-windows-gnu` exclusively. An MSVC clippy run
 will *succeed* while checking the wrong target, so "it compiled" is not evidence
-on its own.
+on its own. `rust-toolchain.toml` pins the toolchain and `.cargo/config.toml`
+pins the target, so a bare `cargo build` is already correct.
 
-**Do not hand-assemble PATH.** Use `tools/gate.ps1`, which sets the toolchain and
+## Run the app: `./tools/run.ps1`
+
+One command. It locates the toolchain, stops a copy of orca that would hold the
+executable open, builds, launches, and writes `run.log`.
+
+You do not need the gate to run the app. `tools/gate.ps1` (build + test + fmt +
+clippy) is for checking a *change*, and running it is the agent's job, not the
+user's. `./tools/run.ps1 -Gate` runs both if you want them together.
+
+**Do not hand-assemble PATH, and never hardcode a toolchain path.** Use
+`tools/gate.ps1`, which locates the toolchain via `rustup which rustc` and
 asserts it exists. If you must call cargo directly:
 
 ```powershell
-$env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
+$env:PATH = (Split-Path (rustup which rustc)) + ";$env:PATH"
 ```
+
+A hardcoded `C:\Users\<you>\.rustup\toolchains\...` is not just fragile, it
+already caused a bug here: a `Test-Path` against a not-yet-resolved working
+directory reported a correctly installed toolchain as missing, and the tooling
+told the user to install a toolchain they already had. `tools/toolchain.ps1` is
+the single source of truth for this and is what the scripts use.
 
 Dot-sourcing `crates/orca-probe/probe-harness.ps1` also sets it automatically.
 
