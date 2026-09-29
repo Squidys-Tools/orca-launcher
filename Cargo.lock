@@ -3777,6 +3777,9 @@ dependencies = [
 [[package]]
 name = "orca-win"
 version = "0.1.0"
+dependencies = [
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "ordered-float"
