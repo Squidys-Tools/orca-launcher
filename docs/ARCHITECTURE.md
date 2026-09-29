@@ -484,6 +484,29 @@ foreground=false`, the problem is z-order or activation, not lifecycle. If it
 says `visible=false`, the window was never shown. If the rect is empty or
 degenerate, it was moved somewhere it cannot be seen.
 
+## Window class names may not contain `(` or `)`
+
+`CreateWindowExW` failed with **ERROR_RESOURCE_TYPE_NOT_FOUND (1813)** — "the
+window class does not exist" — for a class that `RegisterClassW` had accepted
+microseconds earlier.
+
+The cause was the class name. It was built with `{:?}` on a `ThreadId`, which
+formats as `ThreadId(3)`. MSDN restricts window class names to characters that
+are valid in a file name, and parentheses are not among them. The failure is
+deeply misleading because it is not reported where it happens: `RegisterClassW`
+*succeeds*, and only `CreateWindowExW` fails, so the error names a class that
+provably exists.
+
+The thread id is now taken from `GetCurrentThreadId` rather than from
+`std::thread::current().id()`, whose only *stable* formatting route is `Debug`
+(`as_u64` is still unstable). A test asserts the generated name contains no
+characters from the illegal set, so this cannot regress quietly.
+
+**The general lesson:** when Win32 says a resource is missing, suspect the name
+you built rather than the lifetime you gave it. Error 1813 in particular says
+"not found", which invites a hunt through handle-lifetime bugs; here the handle
+was fine and the *string* was malformed.
+
 ## Decisions
 
 **Workspace `resolver = "2"`, edition 2021.** Resolver 2 is required to be

@@ -271,6 +271,26 @@ struct PumpState {
 
 /// Runs the message loop for the tray window.
 ///
+/// The window class name for this process's tray pump.
+///
+/// Unique per process *and* per thread, so a test's tray and the real one cannot
+/// collide inside one process.
+///
+/// Only characters valid in a file name are allowed. Windows rejects anything
+/// else for a class name, and does so confusingly: `RegisterClassW` succeeds and
+/// the failure surfaces at `CreateWindowExW` as ERROR_RESOURCE_TYPE_NOT_FOUND
+/// (1813) — "class not found" for a class that was just registered. The
+/// `ThreadId(3)` that `{:?}` produces contains parentheses, which is exactly such
+/// a character, so the thread id is taken from Win32 rather than from
+/// `std::thread::current().id()` — whose only stable formatting route is
+/// `Debug`, and whose numeric accessor is still unstable.
+fn tray_class_name() -> String {
+    // SAFETY: `GetCurrentThreadId` takes no arguments, has no preconditions and
+    // cannot fail; it is a pure query about the calling thread.
+    let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    format!("OrcaTrayWindow-{}-{}", std::process::id(), thread)
+}
+
 /// Lives on its own thread because it must: the loop blocks, and the caller's
 /// thread is the one that has to keep answering questions.
 fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32, TrayError>>) {
@@ -290,11 +310,17 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
     // — a test's and the real one, say — cannot collide. `RegisterClassW` fails
     // for a name that is already registered, which would otherwise make the
     // second one fail for no visible reason.
-    let class_name = format!(
-        "OrcaTrayWindow-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    );
+    //
+    // The id is formatted with `as_u64`, NOT with `{:?}`. `Debug` for
+    // `ThreadId` prints `ThreadId(3)`, and the parentheses are not legal in a
+    // window class name: MSDN restricts class names to characters that are valid
+    // in a file name, and `(` and `)` are excluded. The failure mode is nasty
+    // rather than obvious — `RegisterClassW` *succeeds*, and then
+    // `CreateWindowExW` fails with ERROR_RESOURCE_TYPE_NOT_FOUND (1813),
+    // "the class does not exist", for a class that was registered a moment
+    // earlier. That cost a full debugging session: the tray icon simply never
+    // appeared, with an error that pointed nowhere near the real cause.
+    let class_name = tray_class_name();
     let class_wide = wide_nul(&class_name);
 
     let window_class = WNDCLASSW {
@@ -830,6 +856,36 @@ impl Drop for TrayIcon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_class_name_contains_no_illegal_characters() {
+        // Regression test. The name used to be built with `{:?}` on a
+        // `ThreadId`, which formats as `ThreadId(3)`. The parentheses are not
+        // legal in a window class name, so `RegisterClassW` succeeded and then
+        // `CreateWindowExW` failed with ERROR_RESOURCE_TYPE_NOT_FOUND (1813) —
+        // "class not found" for a class that had been registered moments
+        // earlier. The tray icon simply never appeared, and the error pointed
+        // nowhere near the cause.
+        let name = tray_class_name();
+        for (index, character) in name.chars().enumerate() {
+            assert!(
+                !matches!(
+                    character,
+                    '(' | ')' | '[' | ']' | '{' | '}' | ';' | ',' | '=' | '+' | '`' | '\'' | '"'
+                ),
+                "illegal character {character:?} at position {index} in class name {name:?}"
+            );
+        }
+        assert!(name.starts_with("OrcaTrayWindow-"), "{name}");
+    }
+
+    #[test]
+    fn the_tray_class_name_is_unique_per_process_and_thread() {
+        // Two trays in one process must not share a class, or `RegisterClassW`
+        // fails for the second one for no visible reason.
+        assert_eq!(tray_class_name(), tray_class_name());
+        assert_ne!(tray_class_name(), "OrcaTrayWindow");
+    }
 
     #[test]
     fn decodes_the_left_click_shell_sends() {

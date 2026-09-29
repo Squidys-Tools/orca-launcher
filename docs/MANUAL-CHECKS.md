@@ -331,7 +331,16 @@ Implemented and unit-tested, but the tests stop at the seam. A fake cannot prove
 Windows does the thing.
 
 - [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
-      handler runs, then unbind and confirm the combination is free again.
+  handler runs, then unbind and confirm the combination is free again.
+- [ ] **The tray icon.** It has been broken and is now fixed but unverified. Look
+  for an orca icon in the notification area (may need the `^` overflow chevron).
+  - The line `tray icon unavailable: tray message window could not be created
+    (Win32 error 1813)` should be **gone** from the log. If it is still there, the
+    class-name fix did not work — please report it with the full log.
+  - Left-click should show the popup; right-click should open a menu with
+    *Show orca* and *Quit*; *Quit* must exit the process.
+  - The icon must survive 20 popup toggles. It used to be impossible to test this
+    at all, because the icon never appeared.
 - [ ] Bind a hotkey another app already owns: the failure must be **reported**
       (`…unavailable: …`) and the launcher must carry on.
 - [ ] Start the launcher twice: the second must raise the first and exit with
