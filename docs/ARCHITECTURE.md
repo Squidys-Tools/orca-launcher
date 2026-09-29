@@ -422,6 +422,68 @@ a `Send` future, and any future holding a GPUI type is `!Send`, because
 polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
 live on the foreground executor. It is not a slow path, it is a dead one.
 
+## `Window::activate_window` is asynchronous, and that matters
+
+`Window::activate_window()` looks like the obvious way to bring the popup to the
+front. It is the wrong tool, and using it produced a bug that survived one round
+of confident misdiagnosis.
+
+Internally, `gpui_windows`'s `activate()` **spawns** its work onto the window's
+executor and returns immediately. So:
+
+* Anything done after `activate_window()` is racing a task that has not started.
+* The spawned task calls `SetActiveWindow` and `SetFocus`, but **never**
+  `SetForegroundWindow`. Under the foreground lock — which applies because this
+  process is not at UIAccess integrity — the window can end up visible and
+  behind whatever is in front.
+* It also calls `set_window_placement()` first, which is a no-op after the first
+  call (`initial_placement.take()`), so that part is harmless.
+
+Combined with `SW_SHOWNOACTIVATE` — chosen deliberately, so that `ShowWindow`
+would not race the `SetFocus` — the popup was shown without being raised and
+without a real foreground call. Symptom: the launcher was opening *behind*
+whichever window you were working in, which from the outside is identical to it
+not opening at all.
+
+The fix is to stop relying on GPUI for this and do it synchronously on the
+calling thread, in a fixed order:
+
+1. `place_on_cursor` — reposition for a possibly-changed monitor layout.
+2. `refresh()` — request a frame, or the re-shown window shows its last one.
+3. `focus` — GPUI-level focus id only.
+4. `ShowWindow(SW_SHOWNOACTIVATE)` — make it visible without activating.
+5. `SetWindowPos(HWND_TOPMOST, … | SWP_NOACTIVATE)` — lift the z-order, leave
+   the foreground window alone.
+6. `orca_win::activate` — the real foreground activation, which already carries
+   the `AttachThreadInput` workaround the foreground lock requires.
+
+## Log what you measured, not what you intended
+
+The reason this bug took two attempts is worth recording, because it is a
+general trap rather than a detail of this codebase.
+
+`popup: shown (retained window)` was printed unconditionally after a successful
+`Entity::update`. That call only proves the entity accepted an update. It says
+nothing whatsoever about whether a window reached the screen. So the log
+affirmatively reported success on every press while the launcher was opening
+behind another window, and "the log says it worked" was actively misleading.
+
+Four states are indistinguishable from outside the app: hidden, shown-but-
+behind, shown-off-screen, and destroyed. Each has been mistaken for another here.
+
+The show path now prints the measured state — `IsWindowVisible`, whether the
+window is the foreground window, and its actual `GetWindowRect` — on every show.
+A failure now names itself:
+
+```
+popup: show -> visible=true foreground=false rect=(478,232 640x400)  [NOT in foreground: it may be behind another window]
+```
+
+If a report says "it will not open" and the log says `visible=true
+foreground=false`, the problem is z-order or activation, not lifecycle. If it
+says `visible=false`, the window was never shown. If the rect is empty or
+degenerate, it was moved somewhere it cannot be seen.
+
 ## Decisions
 
 **Workspace `resolver = "2"`, edition 2021.** Resolver 2 is required to be

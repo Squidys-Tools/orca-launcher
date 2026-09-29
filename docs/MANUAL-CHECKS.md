@@ -41,35 +41,42 @@ the popup, that is a bug.
 
 ## 1. The retained window — the highest-risk thing in this change
 
-### 1a. Reopening after Esc — REGRESSED, then fixed. Please re-check this one first
+### 1a. Reopening after Esc — please read the log, not just the screen
 
-**This failed on the first human run.** Reported as: *"launched with the hotkey,
-pressed escape, and wasn't able to reopen with the hotkey."*
+**This has now failed twice, in two different ways, and both were invisible from
+the screen alone. The log line is the real diagnostic.**
 
-The cause was not the retained window and not the hotkey. Both were fine. The bug
-was that the command pump — the task that drains hotkey presses into the UI —
-was parked on GPUI's **foreground** executor, which on Windows stops scheduling
-when no window is visible. A launcher is hidden most of the time, so after
-<kbd>Esc</kbd> the pump was never woken again. The hotkey kept firing and the
-command kept queueing; nothing read it.
+Run it, then trigger the launcher 4–5 times with <kbd>Esc</kbd> between presses,
+pausing a few seconds each time. Then look at the `popup: show ->` lines.
 
-The tell was in the log: it stopped dead at `popup: hidden (window retained)`
-with no error line, and no third `popup: shown`. Two toggles had worked, which
-made it look intermittent — the first show put a window up, which kept the
-executor awake long enough for the next press.
+Every show now prints the window's measured state:
 
-Fixed by moving the pump onto a dedicated thread. Please confirm:
+```
+popup: show -> visible=true foreground=true rect=(478,232 640x400)
+```
 
-1. Start the launcher, press <kbd>Ctrl+Alt+Space</kbd>. Popup appears.
-2. Press <kbd>Esc</kbd>.
-3. **Wait a few seconds** — a pause is what triggered the original failure.
-4. Press <kbd>Ctrl+Alt+Space</kbd> again. The popup must reappear.
-5. Repeat steps 2–4 at least ten times, with a pause at step 3 each time.
-6. **Expected:** a `popup: shown` / `popup: hidden` pair per toggle, and the
-   process never exits.
-7. If it ever goes quiet, the log's *last* line tells you which half broke:
-   `hidden` means the press was not drained, `shown` means the show itself
-   failed.
+Read it like this:
+
+| What the log says | What it means |
+|---|---|
+| `visible=true foreground=true` | Correct. The window is on screen and in front. |
+| `visible=true foreground=false` | **This was bug #2.** The window is on screen but *behind* another window. Press <kbd>Alt+Tab</kbd> or check the taskbar — it is probably sitting there. |
+| `visible=false` | The window was never shown. This is a lifecycle problem, not a z-order one. |
+| `rect=(0,0 0x0)` or wildly off-screen | It was moved somewhere it cannot be seen. Note the coordinates. |
+| No `popup: show ->` line at all | The command was not drained — the earlier pump bug, now fixed. |
+
+The two bugs already fixed, for context:
+
+1. The command pump was parked on GPUI's *foreground* executor, which Windows
+   stops scheduling when no window is visible. The hotkey fired, the command
+   queued, nothing read it. Now on a dedicated thread.
+2. `Window::activate_window()` spawns its work and returns immediately, so the
+   activation raced everything after it, and it never calls
+   `SetForegroundWindow`. The popup opened *behind* the foreground window. Now
+   activation is synchronous and explicit, in a fixed order.
+
+**What to report back:** paste the `popup: show ->` lines. They are designed to
+make a third round of guessing unnecessary.
 
 ### 1b. Esc hides without killing the launcher
 

@@ -419,10 +419,33 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 // GPUI focus id only; makes no platform call. First, so the
                 // handle is resolved when the real activation lands.
                 window.focus(&focus, cx);
-                // The real OS-level activation. `cx.activate(true)` is a literal
-                // no-op on Windows; this path does SetActiveWindow/SetFocus plus
-                // a SendInput Alt tap to defeat the foreground lock.
-                window.activate_window();
+                if let Some(hwnd) = win::hwnd(window) {
+                    // Synchronously, on this thread, and *after* everything
+                    // else. `Window::activate_window` cannot be used here: it
+                    // spawns its work onto the window's executor, so it returns
+                    // before it has done anything, and everything after it
+                    // races a task that has not started. That was the cause of
+                    // the launcher appearing "not to open" on the third toggle:
+                    // the window was shown but the activation had not happened
+                    // yet, so it sat behind the foreground window while the log
+                    // cheerfully printed `popup: shown`.
+                    win::set_shown(hwnd, true);
+                    win::raise(hwnd);
+                    let foreground = win::activate(hwnd);
+                    // Report the measured state, not the intent. A launcher that
+                    // is visible but behind another window is indistinguishable
+                    // from one that never opened, and that ambiguity is what
+                    // made this bug survive two rounds of guessing.
+                    log(&format!(
+                        "popup: show -> {}",
+                        win::describe(hwnd)
+                            + if foreground {
+                                ""
+                            } else {
+                                "  [NOT in foreground: it may be behind another window]"
+                            }
+                    ));
+                }
             });
             if outcome.is_ok() {
                 launcher.update(app, |launcher, _| {
@@ -449,7 +472,16 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
             return;
         }
         telemetry.arm();
-        log("popup: shown (retained window)");
+        // Report what was *measured*, not what was intended. The previous
+        // version of this line was printed unconditionally after a successful
+        // `Entity::update`, which says nothing about whether a window reached
+        // the screen. That is how a launcher that was opening behind another
+        // window still logged `popup: shown` on every press.
+        log(if shown {
+            "popup: shown (retained window)"
+        } else {
+            "popup: show failed (retained window)"
+        });
         return;
     }
 

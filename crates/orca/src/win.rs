@@ -57,17 +57,19 @@
 //! The interesting half — which display contains a point — is
 //! [`display_containing`], which is pure and tested.
 
+use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
 use orca_core::LaunchTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    GetCursorPos, GetWindowRect, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOPMOST,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
 /// Win32's baseline DPI. A monitor reporting this is at 100% scaling.
@@ -134,9 +136,21 @@ pub fn hwnd(window: &Window) -> Option<HWND> {
 
 /// Shows or hides a window without destroying it.
 ///
-/// `SW_SHOWNOACTIVATE` rather than `SW_SHOW`: activation is a separate step
-/// (`Window::activate_window`), and letting `ShowWindow` activate would race
-/// with the `SetFocus` that follows.
+/// `SW_SHOWNOACTIVATE` rather than `SW_SHOW` for the *show* case, because
+/// activation is a separate and explicit step ([`activate`]).
+///
+/// That split is the whole point, and it is why activation must be synchronous.
+/// `Window::activate_window` cannot be used for this: it *spawns* the activation
+/// onto the window's executor, so it returns before any of the work happens. Any
+/// code after it is racing a task that has not started. Worse, that task calls
+/// `SetActiveWindow`/`SetFocus` but never `SetForegroundWindow`, so under the
+/// foreground lock — which applies because this process is not at UIAccess
+/// integrity — the window can end up visible but behind the foreground window.
+/// That looked exactly like "the launcher will not open", while the log said
+/// `popup: shown`.
+///
+/// [`activate`] does the whole job on the calling thread, including the
+/// `AttachThreadInput` trick that is required to defeat the foreground lock.
 pub fn set_shown(hwnd: HWND, shown: bool) {
     let command = if shown { SW_SHOWNOACTIVATE } else { SW_HIDE };
     // SAFETY: `hwnd` came from `HasWindowHandle` on a live window this process
@@ -145,6 +159,78 @@ pub fn set_shown(hwnd: HWND, shown: bool) {
     // the question being asked here, so it is deliberately discarded.
     unsafe {
         let _ = ShowWindow(hwnd, command);
+    }
+}
+
+/// Brings a window to the foreground, synchronously, on the calling thread.
+///
+/// Returns whether the window is *actually* the foreground window when this
+/// returns. Callers should report that value rather than assuming success: the
+/// whole reason this exists is that a previous implementation reported success
+/// unconditionally and the launcher turned out to be hidden behind another
+/// window.
+pub fn activate(hwnd: HWND) -> bool {
+    let handle = orca_win::WindowHandle::from_raw(hwnd.0 as isize);
+    if let Err(error) = orca_win::activate(handle) {
+        log(&format!("activate: {error:?}"));
+        return false;
+    }
+    orca_win::is_foreground(handle)
+}
+
+/// Whether a window is currently visible, ignoring whether it is in front.
+///
+/// `IsWindowVisible` walks the whole parent chain and reports the *effective*
+/// visibility, which is the question that matters for "is there a popup on my
+/// screen right now".
+pub fn is_visible(hwnd: HWND) -> bool {
+    // SAFETY: `hwnd` is a live window handle. `IsWindowVisible` is a pure query
+    // with no side effects and no preconditions beyond a valid handle.
+    unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+/// A one-line, human-readable summary of a window's real state.
+///
+/// This exists because "the launcher did not open" is an ambiguous report: the
+/// window can be hidden, shown-but-behind, shown-but-off-screen, or genuinely
+/// destroyed, and all four look identical from outside the app. Every one of
+/// those has been mistaken for another one in this project already, so the state
+/// is now printed whenever a show does not result in the window being in front.
+pub fn describe(hwnd: HWND) -> String {
+    // SAFETY: `hwnd` is a live window handle. Every call below is a query with no
+    // side effects; `GetWindowRect` writes into a caller-owned RECT.
+    let mut rect = RECT::default();
+    let got_rect = unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok();
+    format!(
+        "visible={} foreground={} rect=({},{} {}x{})",
+        is_visible(hwnd),
+        orca_win::is_foreground(orca_win::WindowHandle::from_raw(hwnd.0 as isize)),
+        rect.left,
+        rect.top,
+        if got_rect { rect.right - rect.left } else { 0 },
+        if got_rect { rect.bottom - rect.top } else { 0 },
+    )
+}
+
+/// Brings a window to the front without necessarily activating it.
+///
+/// `SW_SHOWNOACTIVATE` leaves z-order alone, so a re-shown popup can end up
+/// behind whatever the user was working in. This lifts it to the top of the
+/// z-order while still leaving the foreground window alone.
+pub fn raise(hwnd: HWND) {
+    // SAFETY: `hwnd` is a live window this process owns. SWP_NOACTIVATE keeps
+    // the current foreground window foreground, which is the entire point — we
+    // are lifting the popup, not stealing focus from it here.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 
