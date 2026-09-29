@@ -17,13 +17,23 @@ the log lines quoted below exist precisely so a failure has an unambiguous cause
 ## How to run
 
 ```powershell
-./tools/gate.ps1                                  # must be green first
-$env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
-cargo run -p orca --target x86_64-pc-windows-gnu 2>&1 | Tee-Object run.log
+./tools/gate.ps1                    # must be green first
+cargo run --bin orca 2>&1 | Tee-Object run.log
 ```
 
 `run.log` matters. Every lifecycle decision below is logged, so most of these
 checks are answerable by reading it rather than by guessing from the screen.
+
+> **Always run it exactly like that.** `cargo run` without `--target` used to
+> build into `target/debug` while the gate built into
+> `target/x86_64-pc-windows-gnu/debug` — two separate caches. A binary built
+> from the stale one was run for hours while fixes appeared to do nothing,
+> because the code under test was two days old. `.cargo/config.toml` now pins
+> the target for both, so they cannot diverge again.
+>
+> Tell-tale: if cargo prints `Finished` in well under a second with no
+> `Compiling` lines, it did not rebuild. Run the gate and use the binary it
+> produces.
 
 Startup must log, in roughly this order:
 

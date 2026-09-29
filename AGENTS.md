@@ -47,7 +47,7 @@ not present new static reasoning as if it were observed at runtime.
 | Can the popup be toggled repeatedly? | **Yes** — 10 hide/show cycles confirmed by a human, `visible=true foreground=true` on every show |
 | Was the "cannot reopen after Esc" bug ever about the hotkey? | No — it was the command pump (see `ARCHITECTURE.md`) |
 | How fast is the popup? | 1st open ~1 s, every later open <30 ms. Cold start is the only slow part. |
-| Is the tray icon working? | **Not yet** — two fixes applied, neither confirmed. Check for a blank slot, not a missing one. |
+| Is the tray icon working? | **Unknown.** Two bugs fixed in code; *no confirmed run has included either fix* — see the stale-cache note below. |
 
 ## Verify with the gate, not with ad-hoc commands
 
@@ -84,6 +84,27 @@ Findings already proven at runtime — cite these, do not re-derive them:
 | Does Esc kill the process? | Only under `QuitMode::Default`; fixed with `QuitMode::Explicit` |
 | Is text input focused? | Only with `.track_focus(&focus)` on the dispatch node |
 | Caret units? | `handle_input` speaks UTF-16, the model speaks UTF-8 bytes |
+
+## Build and run through one path, or you will test old code
+
+`.cargo/config.toml` sets `build.target = "x86_64-pc-windows-gnu"`, so `cargo run`
+and `tools/gate.ps1` share one target directory.
+
+**Do not add `--target` to one and not the other, and do not set
+`CARGO_TARGET_DIR` for a single command.** Two different caches is how the
+following happened: `cargo run --bin orca` built into `target/debug`, the gate
+built into `target/x86_64-pc-windows-gnu/debug`, and a binary from the stale
+`target/debug` cache ran for hours while three separate fixes appeared to have no
+effect. The code under test was two days old and nobody could tell, because
+`Finished` in 0.77s looks exactly like a fast successful build.
+
+The check: **`Finished` with no `Compiling` lines means cargo did not rebuild.**
+That is only ever correct immediately after a build. Verify with the file
+timestamp before believing a fix is being tested:
+
+```powershell
+Get-Item target\x86_64-pc-windows-gnu\debug\orca.exe | Select-Object LastWriteTime
+```
 
 ## Multi-agent rules
 

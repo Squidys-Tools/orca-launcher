@@ -1,0 +1,14 @@
+# Force the GNU target for every cargo invocation in this directory.
+#
+# Why this exists: `cargo run --bin orca` without `--target` builds into
+# `target/debug/`, while `./tools/gate.ps1` builds into
+# `target/x86_64-pc-windows-gnu/debug/`. Those are two different caches, and
+# that split caused a real and expensive confusion — a binary built with the
+# stale `target/debug` cache was run for hours while every fix appeared to have
+# no effect, because the code under test was two days old.
+#
+# `build.target` also sets the default for `cargo run`, `cargo test` and
+# `cargo build`, so a bare `cargo run` and the gate now produce the same binary
+# in the same place.
+[build]
+target = "x86_64-pc-windows-gnu"
