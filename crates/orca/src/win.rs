@@ -110,14 +110,14 @@ use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
 use orca_core::LaunchTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::core::{HSTRING, PCSTR, PCWSTR};
+use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DWM_WINDOW_CORNER_PREFERENCE,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
-use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -262,120 +262,127 @@ pub fn round_corners(hwnd: HWND) -> bool {
     .is_ok()
 }
 
-/// `WCA_ACCENT_POLICY`, the `SetWindowCompositionAttribute` attribute that
-/// carries an [`AccentPolicy`] struct.
+/// Removes every piece of window decoration DWM puts on a frameless window.
 ///
-/// Spelled out because the `windows` crate at 0.62 does not export the
-/// composition types at all — `gpui_windows` declares this struct itself, and
-/// so does this. The value is fixed by the Win32 API and has not changed since
-/// Windows 8.
-const WCA_ACCENT_POLICY: u32 = 0x13;
+/// # Two attempts, because the first one was wrong
+///
+/// The first attempt was the accent policy, on the reasoning that
+/// `WindowBackgroundAppearance::Transparent` sends
+/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). **That call returned
+/// success and the frame survived** — `clear_window_frame=true`,
+/// `window frame cleared=true`, no change on screen. So the accent policy was
+/// never what was drawing it, and a log line reporting that the call succeeded
+/// proved nothing whatsoever. Do not trust "the call worked" for a cosmetic
+/// fix; read the value back.
+///
+/// What is left is DWM's own decoration, which Windows draws around *any*
+/// top-level window regardless of its style bits, and which has to be turned
+/// off through the DWM attributes rather than through compositor state:
+///
+/// * `DWMWA_BORDER_COLOR` → `DWMWA_COLOR_NONE`. The 1px outline. It is a
+///   *colour*, not a flag, and the sentinel that removes it is `0xFFFFFFFE` —
+///   passing black would just draw a black border.
+/// * `DWMWA_NCRENDERING_POLICY` → `DWMNCRP_DISABLED`. DWM's automatic drop
+///   shadow. We draw our own, on the panel; DWM's is around the *window*,
+///   which is the larger rectangle, so it sits outside ours rather than behind
+///   it.
+///
+/// Both are then read back with `DwmGetWindowAttribute` and reported. If the
+/// read-back says the border colour is `none` and a frame is *still* visible,
+/// the frame is not DWM's, and the next place to look is our own painting —
+/// specifically whether the backdrop is escaping the panel's clip.
+pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
+    // SAFETY: `hwnd` is a live window this process owns. Each call passes a
+    // pointer to exactly as many bytes of live, initialised local storage as it
+    // claims, and both attributes only affect rendering.
+    let border_cleared = unsafe {
+        let none = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&none as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+    .is_ok();
+    let shadow_cleared = unsafe {
+        let policy = DWMNCRP_DISABLED;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            (&policy as *const DWMNCRENDERINGPOLICY).cast(),
+            std::mem::size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        )
+    }
+    .is_ok();
 
-/// `WCA_ACCENT_ENABLE_NONE`: turn the accent policy off.
-///
-/// This is the same value `gpui_windows` uses for
-/// `WindowBackgroundAppearance::Opaque`, which is how the border is off for a
-/// normal window. Sending it after GPUI has asked for transparency keeps the
-/// transparent swap chain and drops the frame.
-const WCA_ACCENT_ENABLE_NONE: u32 = 0;
-
-/// The payload of a `WCA_ACCENT_POLICY` attribute.
-///
-/// `#[repr(C)]` and the field order are load-bearing: this crosses into user32
-/// by pointer, and a Rust struct is only laid out as the C one when both hold.
-/// `gpui_windows` has the identical declaration.
-#[repr(C)]
-struct AccentPolicy {
-    accent_state: u32,
-    accent_flags: u32,
-    gradient_color: u32,
-    animation_id: u32,
+    WindowDecoration {
+        border_cleared,
+        shadow_cleared,
+        border_now: read_dwm_u32(hwnd, DWMWA_BORDER_COLOR),
+        corners_now: read_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE).map(|value| value as i32),
+    }
 }
 
-/// The `WINDOWCOMPOSITIONATTRIBDATA` that `SetWindowCompositionAttribute` takes.
-#[repr(C)]
-struct WindowCompositionAttribData {
-    attrib: u32,
-    pv_data: *mut std::ffi::c_void,
-    cb_data: usize,
+/// Reads a `u32`-sized DWM attribute back, for logging.
+fn read_dwm_u32(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<u32> {
+    let mut value = DWMWA_COLOR_NONE;
+    // SAFETY: `value` is a live, writable `u32` and the requested size matches
+    // it exactly.
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            attribute,
+            (&mut value as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+    .is_ok();
+    ok.then_some(value)
 }
 
-/// The signature of `user32!SetWindowCompositionAttribute`.
-///
-/// Declared as a function pointer rather than bound through `GetProcAddress`'s
-/// own type, because the address is looked up at runtime and a transmute of a
-/// `FARPROC` to this type is the whole mechanism.
-type SetWindowCompositionAttributeFn =
-    unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+/// What `clear_window_frame` was able to do, and what DWM reports afterwards.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowDecoration {
+    /// `DWMWA_BORDER_COLOR` was accepted.
+    pub border_cleared: bool,
+    /// `DWMWA_NCRENDERING_POLICY` was accepted.
+    pub shadow_cleared: bool,
+    /// The border colour DWM reports, or `None` if it would not say.
+    ///
+    /// `Some(0xfffffffe)` is the state we asked for. Anything else means DWM
+    /// ignored us and the frame is real.
+    pub border_now: Option<u32>,
+    /// The corner preference DWM reports. `DWMWCP_DONOTROUND` is `1`.
+    pub corners_now: Option<i32>,
+}
 
-/// Removes the one-pixel border that transparency turns on.
-///
-/// `SetWindowCompositionAttribute` is not exported by name in any import
-/// library, so it is resolved from `user32.dll` at call time and cached. If it
-/// cannot be found, or refuses, the window keeps its frame — a cosmetic
-/// regression on a popup that otherwise works, which is why it reports rather
-/// than aborts.
-///
-/// Returns `true` when the frame is known to be gone. Logged, because this is
-/// the difference between "a rounded panel floating on the desktop" and "a
-/// dialog", and only a person looking at the screen can confirm the second one
-/// is actually fixed.
-pub fn clear_window_frame(hwnd: HWND) -> bool {
-    static SET_COMPOSITION: std::sync::OnceLock<Option<SetWindowCompositionAttributeFn>> =
-        std::sync::OnceLock::new();
-
-    let Some(setter) = SET_COMPOSITION
-        .get_or_init(|| {
-            // SAFETY: `GetModuleHandleA` with a valid NUL-terminated name
-            // returns a handle to an already-loaded module or an error;
-            // user32 is always loaded in a process that has a window.
-            let user32 = match unsafe {
-                GetModuleHandleA(PCSTR::from_raw(c"user32.dll".as_ptr().cast::<u8>()))
-            } {
-                Ok(module) => module,
-                Err(_) => return None,
-            };
-            // SAFETY: the name is NUL-terminated and the returned address is
-            // only cast, not called, here. The transmute is sound because
-            // `SetWindowCompositionAttribute` really does have this signature
-            // and is the only symbol fetched by this name from user32.
-            let raw = unsafe {
-                GetProcAddress(
-                    user32,
-                    PCSTR::from_raw(c"SetWindowCompositionAttribute".as_ptr().cast::<u8>()),
-                )
-            };
-            // `FARPROC` arrives as an `Option`, so "not exported" is already
-            // the `None` case rather than an error.
-            let raw = raw?;
-            Some(unsafe {
-                std::mem::transmute::<
-                    unsafe extern "system" fn() -> isize,
-                    SetWindowCompositionAttributeFn,
-                >(raw)
-            })
-        })
-        .as_ref()
-    else {
-        return false;
-    };
-
-    let policy = AccentPolicy {
-        accent_state: WCA_ACCENT_ENABLE_NONE,
-        accent_flags: 0,
-        gradient_color: 0,
-        animation_id: 0,
-    };
-    let mut data = WindowCompositionAttribData {
-        attrib: WCA_ACCENT_POLICY,
-        pv_data: &policy as *const AccentPolicy as *mut std::ffi::c_void,
-        cb_data: std::mem::size_of::<AccentPolicy>(),
-    };
-
-    // SAFETY: `data` and the `policy` it points at are both live locals for the
-    // duration of the call, `pv_data` and `cb_data` describe the policy
-    // correctly, and the attribute id is the one that takes this payload.
-    unsafe { setter(hwnd, &mut data) != 0 }
+impl WindowDecoration {
+    /// A single log line naming the measured state, not the intent.
+    ///
+    /// Written so it can be read without a lookup table: the two numbers that
+    /// matter are whether the border is now `none` and whether DWM is still
+    /// rounding corners we did not ask it to round.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let border = match self.border_now {
+            Some(colour) if colour == DWMWA_COLOR_NONE => "none".to_owned(),
+            Some(colour) => format!("{colour:#010x} (DWM ignored us)"),
+            None => "unreadable".to_owned(),
+        };
+        let corners = match self.corners_now {
+            Some(0) => "default",
+            Some(1) => "dont-round",
+            Some(2) => "round",
+            Some(3) => "round-small",
+            Some(_) => "unknown",
+            None => "unreadable",
+        };
+        format!(
+            "border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
+            self.border_cleared, self.shadow_cleared,
+        )
+    }
 }
 
 /// Whether a window is currently visible, ignoring whether it is in front.

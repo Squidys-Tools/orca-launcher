@@ -551,15 +551,19 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     window.focus(&focus, cx);
                     window.activate_window();
                     // Two Win32 touches on the window's own decoration, both of
-                    // them undoing something GPUI's appearance mapping turns on.
-                    // Logged together because the two lines are the whole
-                    // difference between a floating panel and a dialog, and
-                    // neither is visible in a test.
+                    // them undoing something DWM does to a frameless window.
+                    // The summary is *measured* — DWM is asked what it thinks
+                    // afterwards — because a `Set` returning success has
+                    // already been caught claiming a frame was removed when it
+                    // was not.
                     let unrounded = handle.is_some_and(win::round_corners);
-                    let frameless = handle.is_some_and(win::clear_window_frame);
+                    let decoration = match handle {
+                        Some(hwnd) => win::clear_window_frame(hwnd).summary(),
+                        None => "no HWND, window decoration untouched".to_owned(),
+                    };
                     log(&format!(
                         "popup: panel rounds itself; DWM corner rounding \
-                         suppressed={unrounded}, window frame cleared={frameless}"
+                         suppressed={unrounded}; {decoration}"
                     ));
                     handle
                 })
