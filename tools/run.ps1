@@ -42,23 +42,26 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 # --- toolchain: assert it, never hardcode it --------------------------------
 # An earlier version of this file hardcoded
-# `C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin` and
-# failed on any machine whose profile lives somewhere else. That is the wrong
-# shape for the fix: the toolchain is already named in rust-toolchain.toml, so
-# cargo picks it up by itself, and all that is needed is to *check* it rather
-# than to force a path.
+# `C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin`, which
+# fails on any machine whose profile lives somewhere else — and there is more
+# than one profile in play, so that was not hypothetical. The toolchain is
+# already named in rust-toolchain.toml, so cargo picks it up by itself and all
+# that is needed is to *check* it.
 #
-# The check is the part that earns its keep. A bare `cargo run` picks MSVC when
-# MSVC is rustup's default, and MSVC builds the wrong target — silently, because
-# it often succeeds. So: ask rustc what it actually is, and say so loudly when
-# it is not the GNU one this project requires.
-$required = 'x86_64-pc-windows-gnu'
-$rustcVersion = (& rustc --version) 2>&1 | Out-String
-if ($rustcVersion -notmatch $required) {
-  Write-Host "FATAL: the active rustc is not the $required toolchain." -ForegroundColor Red
-  Write-Host "  got: $($rustcVersion.Trim())" -ForegroundColor Red
+# `rustc -vV`, NOT `rustc --version`. The short form prints only
+# `rustc 1.98.1 (48a229cea 2026-09-01)` — it has never contained the host
+# triple, so grepping it for one fails on every machine including a correctly
+# configured one. The verbose form has a `host:` line, which is the only place
+# the triple appears.
+$requiredHost = 'x86_64-pc-windows-gnu'
+$rustcVerbose = (& rustc -vV) 2>&1 | Out-String
+$hostTriple = ([regex]::Match($rustcVerbose, '(?m)^host:\s*(\S+)')).Groups[1].Value
+if ($hostTriple -ne $requiredHost) {
+  Write-Host "FATAL: the active rustc is not the $requiredHost toolchain." -ForegroundColor Red
+  Write-Host "  rustc says its host is: ${hostTriple:-<nothing - rustc -vV failed>}" -ForegroundColor Red
   Write-Host "  rust-toolchain.toml pins the channel; something is overriding it." -ForegroundColor Yellow
-  Write-Host "  Fix with:  rustup override unset" -ForegroundColor Yellow
+  Write-Host "  Check with:  rustup show   (look for an override)" -ForegroundColor Yellow
+  Write-Host "  Remove with: rustup override unset --path <this directory>" -ForegroundColor Yellow
   exit 2
 }
 $env:CARGO_TERM_COLOR = 'never'
