@@ -339,6 +339,10 @@ Windows does the thing.
 
 - [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
   handler runs, then unbind and confirm the combination is free again.
+- [ ] **<kbd>Ctrl</kbd>+<kbd>Esc</kbd> quits the process.** This exists because
+  the tray is the only other quit path and it is broken. Open the popup, press
+  Ctrl+Esc, and confirm the process exits rather than just hiding. Also confirm
+  the popup does not leave a stale window on screen on the way out.
 - [ ] **The tray icon.** It has been broken and is now fixed but unverified. Look
   for an orca icon in the notification area (may need the `^` overflow chevron).
   - The line `tray icon unavailable: tray message window could not be created

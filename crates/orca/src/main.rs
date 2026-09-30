@@ -380,6 +380,11 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
             // out before the input handler sees it. See docs/ARCHITECTURE.md.
             KeyBinding::new("backspace", ui::DeleteBack, None),
             KeyBinding::new("delete", ui::DeleteForward, None),
+            // Exit without the tray. The tray is the intended way out, but it is
+            // currently broken, and a resident launcher with no way to quit is
+            // worse than one extra keybinding. Ctrl+Esc cannot collide with
+            // plain text input the way a bare Escape would.
+            KeyBinding::new("ctrl-esc", ui::Quit, None),
         ]);
 
         log("ready: resident, waiting for the hotkey");

@@ -66,6 +66,7 @@ not present new static reasoning as if it were observed at runtime.
 | How fast is the popup? | 1st open ~1 s, every later open <30 ms. Cold start is the only slow part. |
 | Is the tray icon working? | **No.** Real cause found: `LoadImageW (IDI_APPLICATION)` fails with error 1813, so the icon image itself cannot be loaded. Two earlier "fixes" were wrong. See `ARCHITECTURE.md`. |
 | How was it diagnosed? | By making each Win32 call name itself in the error. Do not re-add a shared error variant across unrelated calls. |
+| How do you exit the app? | <kbd>Ctrl</kbd>+<kbd>Esc</kbd>. Do not add a second path; the tray entry is the intended one. |
 
 ## Verify with the gate, not with ad-hoc commands
 

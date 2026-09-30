@@ -490,6 +490,28 @@ in the repo, loaded via `LR_LOADFROMFILE`, which is a path this code already
 supports through `TrayIconSource::File`. That is untested at runtime, so it is
 recorded as the next thing to try rather than claimed as a fix.
 
+## Every way out needs more than one path
+
+Quit was reachable from exactly one place: the tray icon's *Quit* menu entry. The
+tray icon does not work, so the launcher had **no way to exit at all** other than
+killing it in Task Manager. A resident background process that cannot be stopped
+from its own UI is a bug in its own right, independent of the tray being broken.
+
+<kbd>Ctrl</kbd>+<kbd>Esc</kbd> now quits, as a `ui::Quit` action registered on
+the popup's dispatch chain alongside the other actions. Two details worth keeping:
+
+* It is bound to Ctrl+Esc rather than a bare Escape, because Escape is already
+  "hide" and a bare key that quits would collide with text input.
+* The handler calls the same `dismiss` path as hide before quitting. Under
+  `QuitMode::Explicit` the process does not exit when the last window closes, so
+  quitting without dismissing would leave the popup on screen.
+
+Wiring it needed three things that are easy to miss: declaring the action in
+`actions!`, adding an `on_quit` handler, **and** registering it with
+`.on_action(cx.listener(Self::on_quit))`. The macro only defines the struct — a
+handler with no listener is dead code, and clippy correctly refuses to let that
+ship.
+
 ## A null `hIcon` with `NIF_ICON` set is a blank icon, not an error
 
 The tray icon never appeared, with no error reported. `Shell_NotifyIcon` was
