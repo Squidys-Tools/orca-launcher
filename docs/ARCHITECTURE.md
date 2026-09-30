@@ -457,6 +457,39 @@ calling thread, in a fixed order:
 6. `orca_win::activate` — the real foreground activation, which already carries
    the `AttachThreadInput` workaround the foreground lock requires.
 
+## One error message must name one failure
+
+The tray icon took four attempts and two wrong fixes, and the reason is a single
+design mistake: five different Win32 calls all reported
+`TrayError::WindowCreationFailed { code }`, which rendered as
+`"tray message window could not be created"`.
+
+Three of the five never had anything to do with creating a window. The real
+failure was `LoadImageW` on the stock app icon, reported as a window-creation
+error. The message was believed, so two rounds of debugging chased the window
+class and the `NIF_ICON` flag. Both were changed. Neither was the cause. The
+`WindowCreationFailed` variant is now `SetupFailed { at, code }`, where `at` is
+the call that failed (`"GetModuleHandleW"`, `"RegisterClassW"`, `"CreateWindowExW"`,
+`"LoadImageW (IDI_APPLICATION)"`, `"LoadImageW (file)"`). The same log line then
+identified the real cause on the next run.
+
+**A wrong error message is worse than no error message**, because it is believed
+and it sends the search somewhere specific. If one variant covers several
+failures, it is not one variant; it is a missing distinction. This is the same
+mistake as the popup logging "shown" after a successful `Entity::update`, in a
+different place.
+
+## The tray icon itself is still broken, for a third, separate reason
+
+Confirmed by log: `tray LoadImageW (IDI_APPLICATION) failed (Win32 error 1813)`.
+`ERROR_RESOURCE_TYPE_NOT_FOUND` from `LoadImageW` with a null module means the
+stock icon could not be resolved in this process at all. Not fixed.
+
+The obvious next step is to stop asking for a system icon and ship a real `.ico`
+in the repo, loaded via `LR_LOADFROMFILE`, which is a path this code already
+supports through `TrayIconSource::File`. That is untested at runtime, so it is
+recorded as the next thing to try rather than claimed as a fix.
+
 ## A null `hIcon` with `NIF_ICON` set is a blank icon, not an error
 
 The tray icon never appeared, with no error reported. `Shell_NotifyIcon` was

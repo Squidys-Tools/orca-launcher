@@ -58,8 +58,17 @@ use crate::wide::{copy_wide_fixed, wide_nul};
 /// Something went wrong driving the tray icon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayError {
-    /// The hidden message window or its class could not be created.
-    WindowCreationFailed {
+    /// Something in the tray setup failed.
+    ///
+    /// `at` names the call that failed. This field exists because three separate
+    /// Win32 calls can each fail here, and collapsing them into one message made
+    /// the log actively misleading: it said "tray message window could not be
+    /// created" when the real failure was `LoadImageW`, which sent the debugging
+    /// in the wrong direction twice. A wrong error message is worse than none,
+    /// because it is believed.
+    SetupFailed {
+        /// Which call failed, e.g. `"RegisterClassW"` or `"CreateWindowExW"`.
+        at: &'static str,
         /// The raw Win32 error code, as `GetLastError()` reported it.
         code: u32,
     },
@@ -84,11 +93,8 @@ pub enum TrayError {
 impl fmt::Display for TrayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TrayError::WindowCreationFailed { code } => {
-                write!(
-                    f,
-                    "tray message window could not be created (Win32 error {code})"
-                )
+            TrayError::SetupFailed { at, code } => {
+                write!(f, "tray {at} failed (Win32 error {code})")
             }
             TrayError::NotifyFailed { operation, code } => {
                 write!(
@@ -360,7 +366,8 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
     let module = match unsafe { GetModuleHandleW(None) } {
         Ok(module) => HINSTANCE(module.0),
         Err(e) => {
-            let _ = ready.send(Err(TrayError::WindowCreationFailed {
+            let _ = ready.send(Err(TrayError::SetupFailed {
+                at: "GetModuleHandleW",
                 code: crate::single_instance::last_error_code(&e),
             }));
             return;
@@ -396,7 +403,8 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
     // is a plain `extern "system"` function, so the vtable entry is valid for
     // the process lifetime.
     if unsafe { RegisterClassW(&window_class) } == 0 {
-        let _ = ready.send(Err(TrayError::WindowCreationFailed {
+        let _ = ready.send(Err(TrayError::SetupFailed {
+            at: "RegisterClassW",
             code: unsafe { windows::Win32::Foundation::GetLastError() }.0,
         }));
         return;
@@ -436,7 +444,8 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
             // leak would be permanent. Reclaim it here.
             reclaim_state(state);
             unregister_class(module, &class_wide);
-            let _ = ready.send(Err(TrayError::WindowCreationFailed {
+            let _ = ready.send(Err(TrayError::SetupFailed {
+                at: "CreateWindowExW",
                 code: crate::single_instance::last_error_code(&e),
             }));
             return;
@@ -781,7 +790,8 @@ fn load_icon(source: &TrayIconSource) -> Result<Option<OwnedIcon>, TrayError> {
             // size for this icon type".
             match unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE) } {
                 Ok(handle) => Ok(Some(OwnedIcon::shared(HICON(handle.0)))),
-                Err(e) => Err(TrayError::WindowCreationFailed {
+                Err(e) => Err(TrayError::SetupFailed {
+                    at: "LoadImageW (IDI_APPLICATION)",
                     code: crate::single_instance::last_error_code(&e),
                 }),
             }
@@ -804,7 +814,8 @@ fn load_icon(source: &TrayIconSource) -> Result<Option<OwnedIcon>, TrayError> {
                 // LoadImageW with LR_LOADFROMFILE returns a handle the caller
                 // owns and must release with DestroyIcon, so it is `owned`.
                 Ok(handle) => Ok(Some(OwnedIcon::owned(HICON(handle.0)))),
-                Err(e) => Err(TrayError::WindowCreationFailed {
+                Err(e) => Err(TrayError::SetupFailed {
+                    at: "LoadImageW (file)",
                     code: crate::single_instance::last_error_code(&e),
                 }),
             }

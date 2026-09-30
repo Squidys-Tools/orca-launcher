@@ -64,7 +64,8 @@ not present new static reasoning as if it were observed at runtime.
 | Can the popup be toggled repeatedly? | **Yes** — 10 hide/show cycles confirmed by a human, `visible=true foreground=true` on every show |
 | Was the "cannot reopen after Esc" bug ever about the hotkey? | No — it was the command pump (see `ARCHITECTURE.md`) |
 | How fast is the popup? | 1st open ~1 s, every later open <30 ms. Cold start is the only slow part. |
-| Is the tray icon working? | **Unknown.** Two bugs fixed in code; *no confirmed run has included either fix* — see the stale-cache note below. |
+| Is the tray icon working? | **No.** Real cause found: `LoadImageW (IDI_APPLICATION)` fails with error 1813, so the icon image itself cannot be loaded. Two earlier "fixes" were wrong. See `ARCHITECTURE.md`. |
+| How was it diagnosed? | By making each Win32 call name itself in the error. Do not re-add a shared error variant across unrelated calls. |
 
 ## Verify with the gate, not with ad-hoc commands
 
