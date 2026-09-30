@@ -40,16 +40,27 @@ param(
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path -Parent $PSScriptRoot
 
-# --- toolchain: copied from gate.ps1, and for the same reason ---------------
-# Put the GNU bin dir ahead of everything, and *assert* it, because a silently
-# wrong toolchain is worse than a failing one.
-$gnu = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin"
-if (-not (Test-Path (Join-Path $gnu 'rustc.exe'))) {
-  Write-Host "FATAL: GNU rustc not found at $gnu" -ForegroundColor Red
-  Write-Host "Install it with: rustup toolchain install stable-x86_64-pc-windows-gnu" -ForegroundColor Yellow
+# --- toolchain: assert it, never hardcode it --------------------------------
+# An earlier version of this file hardcoded
+# `C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin` and
+# failed on any machine whose profile lives somewhere else. That is the wrong
+# shape for the fix: the toolchain is already named in rust-toolchain.toml, so
+# cargo picks it up by itself, and all that is needed is to *check* it rather
+# than to force a path.
+#
+# The check is the part that earns its keep. A bare `cargo run` picks MSVC when
+# MSVC is rustup's default, and MSVC builds the wrong target — silently, because
+# it often succeeds. So: ask rustc what it actually is, and say so loudly when
+# it is not the GNU one this project requires.
+$required = 'x86_64-pc-windows-gnu'
+$rustcVersion = (& rustc --version) 2>&1 | Out-String
+if ($rustcVersion -notmatch $required) {
+  Write-Host "FATAL: the active rustc is not the $required toolchain." -ForegroundColor Red
+  Write-Host "  got: $($rustcVersion.Trim())" -ForegroundColor Red
+  Write-Host "  rust-toolchain.toml pins the channel; something is overriding it." -ForegroundColor Yellow
+  Write-Host "  Fix with:  rustup override unset" -ForegroundColor Yellow
   exit 2
 }
-$env:PATH = "$gnu;C:\Users\chris\.cargo\bin;" + $env:PATH
 $env:CARGO_TERM_COLOR = 'never'
 $env:CARGO_TERM_PROGRESS_WHEN = 'never'
 $env:RUST_BACKTRACE = '1'

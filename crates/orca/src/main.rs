@@ -550,16 +550,16 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     place_on_cursor(window, cx);
                     window.focus(&focus, cx);
                     window.activate_window();
-                    // Suppress, not request, DWM's corner rounding: the panel
-                    // rounds itself, and on Windows 11 the window's outer edge
-                    // is the outside of the drop shadow. Logged because it is
-                    // the one number that says whether the OS is rounding
-                    // anything, and a human has to look at the screen to say
-                    // whether the corners came out right.
+                    // Two Win32 touches on the window's own decoration, both of
+                    // them undoing something GPUI's appearance mapping turns on.
+                    // Logged together because the two lines are the whole
+                    // difference between a floating panel and a dialog, and
+                    // neither is visible in a test.
                     let unrounded = handle.is_some_and(win::round_corners);
+                    let frameless = handle.is_some_and(win::clear_window_frame);
                     log(&format!(
-                        "popup: corners are painted by the panel; \
-                         DWM corner rounding suppressed={unrounded}"
+                        "popup: panel rounds itself; DWM corner rounding \
+                         suppressed={unrounded}, window frame cleared={frameless}"
                     ));
                     handle
                 })

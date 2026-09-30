@@ -242,12 +242,24 @@ wallpaper. A flat-coloured background hides a compositing failure completely.
 - [ ] The panel's four corners are rounded, with a radius of roughly 16px. The
       radius must be **visibly larger** than the radius on the selected row
       inside it; if they look the same, the panel is not rounding.
-- [ ] The **outer** edge of the window is square. A rounded outer edge means DWM
-      is rounding the window and clipping the shadow, which `win::round_corners`
-      exists to prevent. Check the log for
-      `DWM corner rounding suppressed=true`; if it says `false` on Windows 11,
-      that attribute was rejected and DWM's preference is whatever it defaults
-      to.
+- [ ] **There must be no frame around the panel.** Not a border, not an outline,
+      not a rectangle of any kind outside the panel's own drop shadow. What you
+      should see is the panel, its shadow, and then straight through to the
+      desktop. Read the log:
+
+      ```
+      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
+      ```
+
+      | What the log says | What it means |
+      |---|---|
+      | `window frame cleared=true` | The frame removal was accepted by Windows. |
+      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. The frame will still be there. |
+      | `DWM corner rounding suppressed=false` | The attribute was rejected — expected below Windows 11, a defect on it. |
+
+      This is the highest-value line in the log for judging whether the popup
+      looks like a launcher or like a dialog, and it is a `false` on the first
+      line to look at when a 1px rectangle is visible around the panel.
 - [ ] Repeat at 125% and 150% scaling. A radius is in logical pixels, so it
       should look the same physical size; if it looks chunky at 150%, the radius
       is being applied in physical pixels somewhere.

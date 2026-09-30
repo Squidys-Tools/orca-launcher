@@ -531,6 +531,46 @@ reason they cannot come back:
   There is no reliable query for which kind you have, so `DcGuard` records it at
   creation. Getting this backwards leaks a handle on every hotkey press.
 
+### The window frame: `Transparent` asks Windows for a border
+
+`WindowBackgroundAppearance::Transparent` — the value this whole design rests on
+— puts a **one-pixel border around the entire window**, and the popup looked
+like a dialog with a rounded panel inside it until this was found.
+
+It is not a GPUI rendering decision, and it is not a consequence of the swap
+chain being transparent. `gpui_windows` maps each appearance onto
+`SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
+`Transparent` it sends:
+
+| field | value | meaning |
+|---|---|---|
+| `accent_state` | 2 | `ACCENT_ENABLE_TRANSPARENTGRADIENT` |
+| `accent_flags` | 2 | **`WCA_ACCENT_FLAG_DRAW_ALLBORDERS`** |
+
+`Opaque` sends `accent_state = 0` instead, which is why the border is *new*
+rather than pre-existing — choosing transparency is precisely what asks Windows
+for it. Read it in `gpui_windows/src/window.rs`, `set_background_appearance`
+and `set_window_composition_attribute`.
+
+The two mechanisms are independent, which is what makes it fixable in six lines:
+the per-pixel alpha comes from the Direct Composition swap chain being cleared
+to `[0, 0, 0, 0]`, **not** from the accent policy. So `win::clear_window_frame`
+sends `accent_state = 0` (`WCA_ACCENT_ENABLE_NONE`) after GPUI has set the
+appearance. The frame goes, the shadow margin stays transparent.
+
+`SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
+cached, because it is not exported by name in any import library. The
+`AccentPolicy` and `WINDOWCOMPOSITIONATTRIBDATA` structs are declared locally —
+the `windows` crate at 0.62 does not export them, and `gpui_windows` declares
+the identical two. `#[repr(C)]` and the field order are load-bearing, because
+both cross into user32 by pointer.
+
+**The general lesson:** "transparent window" is two separate Windows features
+that happen to be requested together, and turning on the wrong one is invisible
+until a human looks at a screenshot. Anything that reads as a window
+*decoration* — border, shadow, corner — is DWM's business, not the renderer's,
+and has to be checked separately from anything that reads as pixel content.
+
 ### The panel is translucent, so contrast has to be composited
 
 Every fill in the palette except the text colours now carries an alpha, because

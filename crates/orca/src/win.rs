@@ -83,18 +83,41 @@
 //! This function therefore *suppresses* the DWM rounding rather than asking for
 //! it, so a Windows 11 build cannot quietly round the window's outer edge and
 //! clip the shadow the panel is floating on.
+//!
+//! # The frame around the window
+//!
+//! `WindowBackgroundAppearance::Transparent` — the value the whole design
+//! depends on — also puts a **one-pixel border around the entire window**.
+//!
+//! That is not a GPUI rendering decision. `gpui_windows` maps the appearance
+//! onto `SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
+//! `Transparent` it sends `accent_state = 2`
+//! (`ACCENT_ENABLE_TRANSPARENTGRADIENT`) with `accent_flags = 2`
+//! (`WCA_ACCENT_FLAG_DRAW_ALLBORDERS`) — read it in
+//! `gpui_windows/src/window.rs`, `set_window_composition_attribute`. `Opaque`
+//! sends `accent_state = 0` instead, which is why the border is new rather than
+//! pre-existing. Choosing transparency is precisely what asks Windows for it.
+//!
+//! The two things are independent, and that is what makes this fixable: the
+//! per-pixel alpha comes from the Direct Composition swap chain being cleared
+//! to `[0, 0, 0, 0]`, not from the accent policy. So turning the policy back off
+//! removes the frame and leaves the shadow margin transparent.
+//!
+//! Hence [`clear_window_frame`]. It is `Opaque`'s `accent_state` of `0` —
+//! `WCA_ACCENT_ENABLE_NONE` — applied after GPUI has set the appearance.
 
 use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
 use orca_core::LaunchTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -237,6 +260,122 @@ pub fn round_corners(hwnd: HWND) -> bool {
         )
     }
     .is_ok()
+}
+
+/// `WCA_ACCENT_POLICY`, the `SetWindowCompositionAttribute` attribute that
+/// carries an [`AccentPolicy`] struct.
+///
+/// Spelled out because the `windows` crate at 0.62 does not export the
+/// composition types at all — `gpui_windows` declares this struct itself, and
+/// so does this. The value is fixed by the Win32 API and has not changed since
+/// Windows 8.
+const WCA_ACCENT_POLICY: u32 = 0x13;
+
+/// `WCA_ACCENT_ENABLE_NONE`: turn the accent policy off.
+///
+/// This is the same value `gpui_windows` uses for
+/// `WindowBackgroundAppearance::Opaque`, which is how the border is off for a
+/// normal window. Sending it after GPUI has asked for transparency keeps the
+/// transparent swap chain and drops the frame.
+const WCA_ACCENT_ENABLE_NONE: u32 = 0;
+
+/// The payload of a `WCA_ACCENT_POLICY` attribute.
+///
+/// `#[repr(C)]` and the field order are load-bearing: this crosses into user32
+/// by pointer, and a Rust struct is only laid out as the C one when both hold.
+/// `gpui_windows` has the identical declaration.
+#[repr(C)]
+struct AccentPolicy {
+    accent_state: u32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+/// The `WINDOWCOMPOSITIONATTRIBDATA` that `SetWindowCompositionAttribute` takes.
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attrib: u32,
+    pv_data: *mut std::ffi::c_void,
+    cb_data: usize,
+}
+
+/// The signature of `user32!SetWindowCompositionAttribute`.
+///
+/// Declared as a function pointer rather than bound through `GetProcAddress`'s
+/// own type, because the address is looked up at runtime and a transmute of a
+/// `FARPROC` to this type is the whole mechanism.
+type SetWindowCompositionAttributeFn =
+    unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+
+/// Removes the one-pixel border that transparency turns on.
+///
+/// `SetWindowCompositionAttribute` is not exported by name in any import
+/// library, so it is resolved from `user32.dll` at call time and cached. If it
+/// cannot be found, or refuses, the window keeps its frame — a cosmetic
+/// regression on a popup that otherwise works, which is why it reports rather
+/// than aborts.
+///
+/// Returns `true` when the frame is known to be gone. Logged, because this is
+/// the difference between "a rounded panel floating on the desktop" and "a
+/// dialog", and only a person looking at the screen can confirm the second one
+/// is actually fixed.
+pub fn clear_window_frame(hwnd: HWND) -> bool {
+    static SET_COMPOSITION: std::sync::OnceLock<Option<SetWindowCompositionAttributeFn>> =
+        std::sync::OnceLock::new();
+
+    let Some(setter) = SET_COMPOSITION
+        .get_or_init(|| {
+            // SAFETY: `GetModuleHandleA` with a valid NUL-terminated name
+            // returns a handle to an already-loaded module or an error;
+            // user32 is always loaded in a process that has a window.
+            let user32 = match unsafe {
+                GetModuleHandleA(PCSTR::from_raw(c"user32.dll".as_ptr().cast::<u8>()))
+            } {
+                Ok(module) => module,
+                Err(_) => return None,
+            };
+            // SAFETY: the name is NUL-terminated and the returned address is
+            // only cast, not called, here. The transmute is sound because
+            // `SetWindowCompositionAttribute` really does have this signature
+            // and is the only symbol fetched by this name from user32.
+            let raw = unsafe {
+                GetProcAddress(
+                    user32,
+                    PCSTR::from_raw(c"SetWindowCompositionAttribute".as_ptr().cast::<u8>()),
+                )
+            };
+            // `FARPROC` arrives as an `Option`, so "not exported" is already
+            // the `None` case rather than an error.
+            let raw = raw?;
+            Some(unsafe {
+                std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    SetWindowCompositionAttributeFn,
+                >(raw)
+            })
+        })
+        .as_ref()
+    else {
+        return false;
+    };
+
+    let policy = AccentPolicy {
+        accent_state: WCA_ACCENT_ENABLE_NONE,
+        accent_flags: 0,
+        gradient_color: 0,
+        animation_id: 0,
+    };
+    let mut data = WindowCompositionAttribData {
+        attrib: WCA_ACCENT_POLICY,
+        pv_data: &policy as *const AccentPolicy as *mut std::ffi::c_void,
+        cb_data: std::mem::size_of::<AccentPolicy>(),
+    };
+
+    // SAFETY: `data` and the `policy` it points at are both live locals for the
+    // duration of the call, `pv_data` and `cb_data` describe the policy
+    // correctly, and the attribute id is the one that takes this payload.
+    unsafe { setter(hwnd, &mut data) != 0 }
 }
 
 /// Whether a window is currently visible, ignoring whether it is in front.
