@@ -94,7 +94,7 @@ use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -317,6 +317,36 @@ pub fn move_to(hwnd: HWND, x: f32, y: f32) {
 /// monitor's bounds, and against any other it will not match.
 #[must_use]
 pub fn logical_cursor() -> Option<(f32, f32)> {
+    let (point, _, scale_x, scale_y) = cursor_geometry()?;
+    Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
+}
+
+/// The cursor's position in **physical** pixels, plus the scale factor of the
+/// monitor it is on.
+///
+/// The scale factor is needed on its own for the backdrop capture, which asks
+/// Win32 for physical pixels while every number GPUI hands out is logical.
+/// There is no way to get it from `PlatformDisplay` at this rev —
+/// `scale_factor()` lives on `PlatformWindow`, and the first show happens before
+/// there is a window — so it is read from the monitor directly, by the same
+/// call that makes the logical/physical conversion correct in the first place.
+///
+/// Returning the physical position alongside means the capture and the
+/// placement are guaranteed to be talking about the same monitor and the same
+/// point, rather than each doing its own cursor read and hoping they agree.
+#[must_use]
+pub fn cursor_physical_and_scale() -> Option<((i32, i32), f32)> {
+    let (point, _, scale_x, _) = cursor_geometry()?;
+    Some(((point.x, point.y), scale_x))
+}
+
+/// The cursor, and the effective DPI of its monitor, in one trip to Win32.
+///
+/// Shared by [`logical_cursor`] and [`cursor_physical_and_scale`] because they
+/// must agree: two independent cursor reads can land on different monitors when
+/// the pointer crosses a seam between them, and the popup would then be placed
+/// on one display and its backdrop sampled from another.
+fn cursor_geometry() -> Option<(POINT, HMONITOR, f32, f32)> {
     // SAFETY: `GetCursorPos` takes an out-pointer and has no preconditions.
     let mut point = POINT { x: 0, y: 0 };
     // SAFETY: `point` is a live, writable `POINT`.
@@ -336,7 +366,7 @@ pub fn logical_cursor() -> Option<(f32, f32)> {
     if scale_x <= 0.0 || scale_y <= 0.0 {
         return None;
     }
-    Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
+    Some((point, monitor, scale_x, scale_y))
 }
 
 /// The display the cursor is on.

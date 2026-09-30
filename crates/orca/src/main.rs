@@ -42,6 +42,7 @@
 //! development. What keeps the process meaningful with zero windows open is the
 //! hotkey thread and the tray icon.
 
+mod backdrop;
 mod catalog;
 mod launch;
 mod providers;
@@ -409,7 +410,20 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         // The retained path: the window already exists, so this is a show, not a
         // construction. Repositioned first, because a monitor may have been
         // unplugged while the popup was hidden.
+        //
+        // The backdrop is captured here, between the reposition and the
+        // `ShowWindow`, while the window is still hidden. That ordering is the
+        // whole contract — see `crate::backdrop`.
+        let backdrop_bounds = cx.update(|app| {
+            let display = win::display_under_cursor(app);
+            Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
+        });
         let shown = cx.update(|app| {
+            // The window is still hidden at this point, which is the only moment
+            // the capture is safe. Done here rather than inside the
+            // `WindowHandle::update` below because the bounds are needed before
+            // the window is touched at all.
+            refresh_backdrop(launcher, backdrop_bounds, app);
             let outcome = window.update(app, |_, window, cx| {
                 place_on_cursor(window, cx);
                 // No frame is requested by the visibility callback GPUI sends
@@ -490,10 +504,16 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     // the life of the entity, and computing it inside the window-building
     // closure would leave it out of scope for the activation that follows.
     let focus = cx.update(|app| launcher.read(app).focus.clone());
+    let first_bounds = cx.update(|app| {
+        let display = win::display_under_cursor(app);
+        Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
+    });
+    // Before the window exists, which makes this the easy case: there is nothing
+    // on screen to accidentally photograph.
+    cx.update(|app| refresh_backdrop(launcher, first_bounds, app));
     let create = cx.update(|app| {
         let entity = launcher.clone();
-        let display = win::display_under_cursor(app);
-        let bounds = Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app);
+        let bounds = first_bounds;
 
         app.open_window(
             WindowOptions {
@@ -646,6 +666,37 @@ fn spawn_command_pump(
         })
         .map_err(|error| degraded("command pump thread", error))
         .ok();
+}
+
+/// Captures the frosted backdrop for the panel that is about to appear.
+///
+/// Must be called while the popup window is **hidden**, because `BitBlt`
+/// photographs the screen and would otherwise photograph the popup. The
+/// retained-window design means that is the normal state on this path.
+///
+/// The returned `Backdrop`'s cost is logged, not assumed: this runs on the
+/// keystroke-to-paint path and "a screen capture is cheap" is a claim that goes
+/// stale the moment someone changes the blur radius.
+fn refresh_backdrop(
+    launcher: &Entity<Launcher>,
+    target: gpui::Bounds<gpui::Pixels>,
+    app: &mut App,
+) {
+    // Read from the same cursor geometry the placement used, so the backdrop is
+    // sampled from the display the panel is actually going to appear on.
+    let scale = win::cursor_physical_and_scale().map_or(1.0, |(_, scale)| scale);
+    let backdrop = crate::backdrop::capture(target, scale);
+    log(&format!(
+        "backdrop: {} in {:.1} ms at {}x scaling",
+        if backdrop.image.is_some() {
+            "captured and blurred"
+        } else {
+            "unavailable, falling back to a flat fill"
+        },
+        backdrop.took_ms,
+        scale
+    ));
+    launcher.update(app, |launcher, _| launcher.backdrop = backdrop.image);
 }
 
 /// Moves the popup to the cursor's monitor, centred in its work area.

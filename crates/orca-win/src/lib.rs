@@ -34,6 +34,7 @@
 //! | [`Win32Autostart`] | the autostart preference |
 //! | [`TrayIcon`] | the tray menu and its actions |
 //! | [`installed_apps`] | a `ResultProvider` returning `ResultItem`s with `Source::Application` |
+//! | [`capture_screen_region`] | the frosted-glass backdrop behind the popup |
 //! | [`WindowHandle`] | whatever the UI layer produces for a window |
 
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -43,6 +44,7 @@ use std::fmt;
 
 mod apps;
 mod autostart;
+mod backdrop;
 mod foreground;
 mod hotkey;
 mod single_instance;
@@ -56,6 +58,7 @@ pub use autostart::{
     run_command_for, AutostartError, HkcuRunStore, RunValueStore, Win32Autostart,
     MAX_RUN_VALUE_LEN, RUN_KEY,
 };
+pub use backdrop::{capture_screen_region, BackdropError, CapturedRegion};
 pub use foreground::{activate, is_foreground, ForegroundError, WindowHandle};
 pub use hotkey::{
     hotkey_code, modifier_flags, virtual_key, GlobalHotkey, HotkeyBackend, HotkeyError,

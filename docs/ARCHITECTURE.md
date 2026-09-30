@@ -467,32 +467,69 @@ build cannot quietly reintroduce the clipped-shadow failure. It logs whether
 Windows accepted it, because that number is the only thing in the log that says
 which path the corners are taking.
 
-### Why there is no backdrop blur, and what "blurred" would cost
+### Why the backdrop is captured and blurred by us
 
 `gpui` exposes `WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop,
-MicaAltBackdrop}` and `gpui_windows` implements all four through DWM
-(`set_window_composition_attribute`, `dwm_set_window_composition_attribute`).
-None of them is used here, and the reason is specific rather than cautious:
-`Blurred` and the Mica variants apply their material to the **whole window
-rectangle**. The window is larger than the panel, so the material would fill the
-shadow margin too and turn the rounded panel into a rounded *square* — a worse
-outcome than no material at all.
+MicaAltBackdrop}` and `gpui_windows` implements all four through DWM. None of
+them is used, and the reason is specific rather than cautious: they apply their
+material to the **whole window rectangle**. The window is larger than the panel,
+so a backdrop material would fill the shadow margin too and turn the rounded
+panel into a rounded *square* — a worse outcome than no material at all.
 
-So the panel is genuinely translucent and the desktop shows through sharp. Two
-routes to an actual blur, both rejected for now:
+There was also a second, quieter obstacle found by reading the backend rather
+than the API. `MicaBackdrop` goes through `DwmSetWindowAttribute`, and
+`gpui_windows` sets `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is
+enabled — the default, off only when `DISABLE_DIRECT_COMPOSITION` is set. DWM
+backdrops are applied to windows DWM redirects, and a DirectComposition window
+is not redirected, so the attribute may do nothing visible at all. The
+documentation's "not always supported" is doing a lot of quiet work there.
 
-* a second GPUI window behind the panel carrying a backdrop material. This
-  fights the retained-window design and the synchronous foreground activation
-  recorded above; two windows means two z-order and two activation problems.
-* capture the desktop region behind the popup, blur it, and paint it inside the
-  panel. This works, and it is self-contained, but it puts a screen capture on
-  every show, which is exactly the latency the retained window exists to
-  remove, and the capture has to happen while the window is still hidden or it
-  photographs itself.
+So the launcher captures the region behind the panel itself. Three pieces, split
+by the layering rules rather than by convenience:
 
-Neither is a bug. It is a product decision that has not been made yet, and
-`docs/MANUAL-CHECKS.md` section 2d records sharp-translucent as an acceptable
-outcome rather than a defect.
+| piece | where | why there |
+|---|---|---|
+| read the screen | `orca-win::capture_screen_region` | it is the only crate allowed to call Win32 |
+| blur it | `orca-core::backdrop::soften` | it is a total function over a byte buffer, so it is testable thousands of times without a desktop |
+| paint it | `orca::backdrop` | it is wiring between those two and the renderer |
+
+GDI `BitBlt` off the screen DC, not `Windows.Graphics.Capture`: the modern API
+shows a consent dialog and returns a D3D frame pool to copy out of, which for
+blurring a few hundred thousand pixels once per hotkey press is the wrong trade.
+
+**The capture has one precondition, and it is the reason this is not on the
+background executor.** `BitBlt` photographs the screen, so it must run while the
+window is hidden. The retained-window design helps: the window is `SW_HIDE`
+between toggles, so the show path captures *first* and shows second, and the
+very first frame already has the blur on it. Running it asynchronously would
+show an unblurred panel for one frame on the first show and a stale blur
+afterwards. The cost is logged on every show rather than assumed —
+`backdrop: captured and blurred in N ms` — because "a screen capture is cheap"
+goes stale the moment someone changes the blur radius.
+
+**The blur is a downsample, not a Gaussian.** `soften` box-averages by 4, blurs
+the small buffer, and lets the renderer's bilinear filter stretch it back. The
+bilinear upscale is just the last box in a separable chain, so it is visually
+indistinguishable from a wide Gaussian, and it costs about 16× less because the
+expensive step runs on 1/16th of the pixels. `DOWNSAMPLE = 4` is a balance, and
+both failure directions are visible: too large and the upscale shows as faint
+diagonal banding, too small and it stops being cheap and shows up as latency on
+the keystroke path.
+
+Two bugs in that code are worth naming because the tests that caught them are the
+reason they cannot come back:
+
+* **Alpha was normalised by the window width instead of the number of samples
+  actually taken.** At an edge the window runs off the image, so every border
+  lost opacity, and the loss compounded through each pass. The visible symptom
+  is a flat image coming out with translucent edges — a dark band down the right
+  and bottom of the panel, which reads as "the shadow is wrong".
+* **A GDI handle leak waiting to happen.** A memory DC with a bitmap still
+  selected into it cannot be deleted without leaking the bitmap, and a screen DC
+  must be released with `ReleaseDC` while a memory DC is destroyed with
+  `DeleteDC` — calling the wrong one on the wrong kind of handle is undefined.
+  There is no reliable query for which kind you have, so `DcGuard` records it at
+  creation. Getting this backwards leaks a handle on every hotkey press.
 
 ### The panel is translucent, so contrast has to be composited
 

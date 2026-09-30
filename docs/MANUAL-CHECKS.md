@@ -17,20 +17,53 @@ the log lines quoted below exist precisely so a failure has an unambiguous cause
 ## How to run
 
 ```powershell
-./tools/gate.ps1                                  # must be green first
+./tools/run.ps1
+```
+
+That is the whole thing. It sets the GNU toolchain, stops a launcher left running
+from last time, builds only if a source file is newer than the binary, runs it,
+and writes `run.log`.
+
+Two shorter paths, for when you already know what you need:
+
+```powershell
+# already built — just run it, no cargo involved
+.\target\x86_64-pc-windows-gnu\debug\orca.exe
+```
+
+```powershell
+# if you must do it by hand, this is the one that works
 $env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
 cargo run -p orca --target x86_64-pc-windows-gnu 2>&1 | Tee-Object run.log
 ```
 
-`run.log` matters. Every lifecycle decision below is logged, so most of these
-checks are answerable by reading it rather than by guessing from the screen.
+A bare `cargo run -p orca` is the trap: it picks MSVC off `PATH`, which builds
+the wrong target.
+
+**Nothing appears on screen, and that is correct.** The launcher is resident with
+no window until summoned — press <kbd>Ctrl+Shift+Space</kbd>.
+
+**Trust the hotkey in the log, not this page.** The default is
+<kbd>Ctrl+Shift+Space</kbd>, but `config.toml` can change it and the `config:`
+line is the one true on your machine. These instructions were wrong for a while —
+they named <kbd>Ctrl+Alt+Space</kbd>, which the code has never shipped — and a
+person following them would have concluded the launcher was broken.
+
+**If the window does not open and you just changed something, check for a
+resident launcher.** It is a single-instance app: a second copy tells the first
+to show and exits with code 2, so the binary you just built never starts and the
+window belongs to the *old* one. `run.ps1` stops it for you; that is the most
+confusing way this app can appear not to have changed.
+
+`run.log` matters. Most of the checks below are answered by reading it rather
+than by looking at the screen.
 
 Startup must log, in roughly this order:
 
 ```
-[orca] config: hotkey Ctrl+Alt+Space, theme …, 50 result rows
+[orca] config: hotkey Ctrl+Shift+Space, theme …, 50 result rows
 [orca] providers: installed-apps, commands, env
-[orca] hotkey: Ctrl+Alt+Space registered
+[orca] hotkey: Ctrl+Shift+Space registered
 [orca] ready: resident, waiting for the hotkey
 ```
 
@@ -90,7 +123,7 @@ launcher was dead until you restarted it. Both paths now go through one
 
 1. Start the launcher. Wait for `ready: resident…`. No window is on screen; this
    is correct.
-2. Press <kbd>Ctrl+Alt+Space</kbd>. The popup appears and takes focus.
+2. Press <kbd>Ctrl+Shift+Space</kbd>. The popup appears and takes focus.
 3. Press <kbd>Esc</kbd>.
 4. **Expected:** the popup disappears, the process is still running, and the log
    gained exactly one line: `popup: hidden (window retained)`.
@@ -104,7 +137,7 @@ launcher was dead until you restarted it. Both paths now go through one
    something destroyed the window behind the launcher's back, and the next
    toggle has to rebuild it. Note which keypress produced it.
 
-5. Press <kbd>Ctrl+Alt+Space</kbd> again, three more times, alternating with
+5. Press <kbd>Ctrl+Shift+Space</kbd> again, three more times, alternating with
    <kbd>Esc</kbd>.
    **Expected:** every cycle logs `popup: shown (retained window)`. The word
    `created` must appear **exactly once** in the whole log, on the first toggle.
@@ -115,7 +148,7 @@ launcher was dead until you restarted it. Both paths now go through one
    `handle_window_visibility_changed`, which updates the visibility flag and
    requests *no frame*. Without an explicit `Window::refresh()` a re-shown popup
    sits on screen showing its last frame. So: type `note`, let the list fill,
-   press <kbd>Esc</kbd>, press <kbd>Ctrl+Alt+Space</kbd>.
+   press <kbd>Esc</kbd>, press <kbd>Ctrl+Shift+Space</kbd>.
    **Expected:** the query bar is empty and the list is back to the empty-query
    state, painted correctly. If you see the *previous* query and stale results,
    `refresh()` has stopped being called and that is the bug.
@@ -129,7 +162,7 @@ first.
 2. Press <kbd>Enter</kbd>.
    **Expected:** the program opens, the popup disappears, and the log says
    `popup: hidden (window retained)`.
-3. Press <kbd>Ctrl+Alt+Space</kbd> again.
+3. Press <kbd>Ctrl+Shift+Space</kbd> again.
    **Expected:** the popup reappears, empty and focused. If it does not, and
    nothing at all happens, you have the pre-fix bug: activation destroyed the
    retained window.
@@ -155,7 +188,7 @@ process runs out of handles.
 next, but "usually" is doing real work in that sentence.
 
 1. Click into Notepad and type something so you can see where focus is.
-2. <kbd>Ctrl+Alt+Space</kbd> to open the popup, then <kbd>Esc</kbd>.
+2. <kbd>Ctrl+Shift+Space</kbd> to open the popup, then <kbd>Esc</kbd>.
    **Expected:** focus returns to Notepad with the caret where you left it, and
    your next keystroke lands there. If focus lands somewhere arbitrary or on the
    desktop, that is a real defect in the hide path, not a nitpick — it is the
@@ -189,7 +222,7 @@ launcher is worse-looking than before this change.
 
 ### 2a. Is the margin around the panel actually see-through?
 
-1. Start the launcher, press <kbd>Ctrl+Alt+Space</kbd>.
+1. Start the launcher, press <kbd>Ctrl+Shift+Space</kbd>.
 2. **Expected:** a rounded dark panel with a soft shadow under it, floating over
    whatever is behind it. Around the panel — roughly 32px on every side — you
    see the **desktop**, not black.
@@ -228,42 +261,54 @@ wallpaper. A flat-coloured background hides a compositing failure completely.
       one — rather than one uniform grey halo. If it is a single flat ring, only
       one of `Theme::panel_shadows`' two entries is being applied.
 
-### 2d. The blur behind the panel
+### 2d. The frosted backdrop
 
-**Read this one carefully, because the honest position is that it may not work.**
+The panel is translucent *and* blurred: on every show the launcher captures the
+screen region behind the panel, blurs it, and paints it inside the panel under
+the translucent fill. So what shows through should be the desktop,
+recognisably shaped, with no readable text.
 
-The panel is translucent, so the desktop shows through it. Whether what shows
-through is *blurred* depends on the OS applying a backdrop material, and that is
-**not** something this code can guarantee:
+- [ ] Open the launcher over a window with a lot of text. **Expected:** you can
+      tell roughly *what* is behind it — light and dark areas, an image — but
+      not one readable word. Legible text behind the panel means the blur is not
+      running.
+- [ ] Every show prints exactly one line about it:
+      ```
+      backdrop: captured and blurred in 3.2 ms at 1x scaling
+      ```
 
-- `gpui` exposes `WindowBackgroundAppearance::{Transparent, Blurred,
-  MicaBackdrop, MicaAltBackdrop}` and `gpui_windows` implements all of them via
-  DWM. The launcher deliberately uses **`Transparent`**, not `Blurred`, because
-  the window is larger than the panel and a backdrop material would fill the
-  whole window — including the margin where the shadow is — turning the rounded
-  panel into a rounded *square*.
-- Blur-behind is applied by DWM to windows it **redirects**. `gpui_windows` sets
-  `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is on, which is the
-  default (it is off only when the `DISABLE_DIRECT_COMPOSITION` environment
-  variable is set). DComp-composited windows are not redirected, so a backdrop
-  material may do nothing at all.
+      | What the log says | What it means |
+      |---|---|
+      | `captured and blurred in N ms` | Working. `N` is the real cost on the keystroke path. |
+      | `unavailable, falling back to a flat fill` | The capture or blur was refused. The launcher still opens — deliberately not fatal — but the panel is a flat tint. The Win32 error is swallowed, so just report the line. |
+      | No `backdrop:` line at all | The show path is not calling it. |
+      | `at 2x scaling`, and the blur is offset toward the panel's top-left | The physical/logical conversion scaled the size but not the position. |
 
-So there are two acceptable outcomes and one not:
+- [ ] **Check the cost.** The whole reason this blurs a downsampled copy is that
+      it is cheap. If `N` is much above 20 ms it is competing with the reason
+      the launcher exists, and the fix is to lower
+      `orca_core::backdrop::DOWNSAMPLE`, not to accept it.
+- [ ] The blur must **follow the panel**. Move the mouse to another monitor and
+      press the hotkey: the backdrop must be sampled from *that* monitor. Show
+      the previous monitor's wallpaper and the placement and the capture are
+      disagreeing about where the cursor is.
+- [ ] At 125% and 150% scaling the blur must still line up with the panel.
+- [ ] The panel's corners must still be **round**. The backdrop is clipped to
+      the panel; four hard square corners of desktop inside a rounded panel
+      means `overflow_hidden` was removed from the panel.
 
-| What you see | Verdict |
-|---|---|
-| Desktop visible through the panel, blurred | Best case. |
-| Desktop visible through the panel, sharp | **Acceptable.** This is the expected outcome, and the panel still reads as translucent. |
-| Panel is flat dark, nothing of the desktop visible | Panel alpha is too high, or the theme is wrong. Report it. |
-| Black square | Compositing failure — see 2a. |
+### 2e. It really does capture the screen — know that
 
-Getting a *real* blur would need either a second GPUI window (which fights the
-retained-window design and the foreground-activation work in
-`ARCHITECTURE.md`), or capturing the desktop ourselves and blurring it, which
-adds a screen capture to every show. Neither is built. If the sharp version is
-not acceptable, say so and it is a design conversation, not a bug.
+The backdrop comes from GDI `BitBlt` off the screen DC, so it photographs
+whatever is in that rectangle at that moment. There is no consent dialog and
+nothing is stored: the buffer is blurred, painted once, and replaced on the
+next show. But it does mean the launcher can photograph part of the screen — a
+password manager, a video call — every time the hotkey is pressed. If that is
+unacceptable on a particular machine, the capture is one function
+(`orca_win::capture_screen_region`) and removing it returns the launcher to a
+flat translucent panel.
 
-### 2e. The rest of the frame
+### 2f. The rest of the frame
 
 - [ ] The search field has a magnifier at the left and the placeholder reads
       *Search for apps and commands…*. The magnifier is an inline SVG that
@@ -286,7 +331,7 @@ not acceptable, say so and it is a design conversation, not a bug.
       **left** of the footer. Section 4 below depends on them, so if you removed
       them, put them back.
 
-### 2f. The frame on a small display
+### 2g. The frame on a small display
 
 The window is 724×494 logical pixels, chosen so it fits a 1366×768 display at
 150% scaling (910×512 logical) — the tightest case still in use. A test asserts
@@ -487,14 +532,14 @@ Windows does the thing.
 
 So you do not have to re-derive this:
 
-| Covered by the gate (404 tests, clippy `-D warnings`) | Not covered |
+| Covered by the gate (422 tests, clippy `-D warnings`) | Not covered |
 |---|---|
 | Every UTF-16 ⇄ UTF-8 conversion, over six sample strings at every index | Whether Win32 and the IME send those indices |
-| The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results arrive |
+| The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results land |
 | Backspace/delete at every caret position of every sample | Whether the window is really retained, or merely logged as such |
 | The hide decision table (`hide_plan`) | Whether `ShowWindow(SW_HIDE)` hands focus back |
-| **Panel contrast, composited over both a white and a black backdrop** | **Whether the window composites alpha at all — see section 2a** |
-| **The window fits the smallest supported display** | **Whether the corners, the shadow, and the blur look right** |
+| **Panel contrast, composited over both a white and a black backdrop** | **Whether the window composites alpha at all — section 2a** |
+| **Blur maths: edge opacity, spread, and the 16× cost reduction** | **Whether the capture lines up with the panel at your DPI — section 2d** |
 | `InstalledApp` → `RawResult` field-for-field | Whether `installed_apps()` returns a good list on *your* machine |
 | The `DirectoryLister` against the real filesystem | Whether the popup is on the right monitor at your DPI |
 | Argument quoting, `PATH` resolution, hotkey spec parsing | Anything about latency, memory, or feel |
@@ -522,9 +567,6 @@ So nobody assumes otherwise:
   `[files]` and `[commands]` come from `config.toml`; the launcher falls back to
   defaults with a `config.toml … unavailable` line if it cannot read one.
 - **A real `Ctrl+A`.** See section 6.
-- **A real backdrop blur.** The panel is translucent and the desktop shows
-  through it, but it is not *blurred* — see section 2d for why a DWM backdrop
-  material cannot be used here without filling the shadow margin.
 - **No section headers and no favourites.** The reference groups rows under
   "Favorites" / "Applications". Grouping by `Source` was left out on purpose:
   the ranked list interleaves sources, so contiguous-run grouping would produce
@@ -541,7 +583,11 @@ So nobody assumes otherwise:
   `popover` element (`anchored()` only) with `ContextMenu` living in Zed's `ui`
   crate, which is not in the graph. The footer advertises *Open* and *Hide*
   only, because those bindings exist.
-- **The four Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
+- **The result rows are still noisy.** Every application row shows its full
+  executable path as a subtitle, and at this density the list is much busier
+  than the reference. The subtitle is not wrong — it is what tells you *which*
+  of four similarly-named things you are about to launch — but it wants to be
+  optional, or shown only for the selected row.
+- **The five Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
   itemised, documented exception to the layering rule, quarantined in one file
-  with the only `unsafe` in the crate, pending that crate being reopened. There
-  is now a fifth (`DwmSetWindowAttribute`, added for the frame).
+  with the only `unsafe` in the crate, pending that crate being reopened.

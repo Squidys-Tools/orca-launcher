@@ -38,6 +38,7 @@
 //! | [`policy`] | the tunable weights, and the one place they are combined |
 //! | [`rank`] | ordering a catalog against a query |
 //! | [`text`] | case folding and word segmentation |
+//! | [`backdrop`] | turning a screen capture into frosted glass |
 //! | [`config`] | `config.toml` loading, validation, and path construction |
 //! | [`store`] | the [`store::UsageStore`] trait, memory and SQLite backends |
 //! | [`providers`] | the [`providers::ResultProvider`] trait and its pure impls |
@@ -67,6 +68,7 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod backdrop;
 pub mod config;
 pub mod frecency;
 pub mod matching;

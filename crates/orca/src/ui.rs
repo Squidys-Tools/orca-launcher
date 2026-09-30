@@ -246,6 +246,14 @@ pub struct Launcher {
     /// What `theme_preference` resolved to last frame.
     pub theme: Theme,
 
+    /// The blurred desktop behind the panel, recaptured on every show.
+    ///
+    /// Held on the entity rather than the view because it outlives the frame
+    /// and is replaced from the show path, which has no `&mut Window`. `None`
+    /// means the capture was refused and the panel falls back to a flat
+    /// translucent fill — a worse look, and never a reason not to open.
+    pub backdrop: Option<Arc<gpui::RenderImage>>,
+
     /// Shared with the background threads.
     pub engine: Arc<Engine>,
     /// Shared with the frame that measures the popup's latency.
@@ -304,6 +312,7 @@ impl Launcher {
             last_bounds: None,
             theme_preference,
             theme: resolved,
+            backdrop: None,
             engine,
             telemetry,
         }
@@ -921,6 +930,7 @@ impl Render for LauncherView {
         let focus = self.launcher.read(cx).focus.clone();
         let entity = self.launcher.clone();
         let telemetry = self.launcher.read(cx).telemetry.clone();
+        let backdrop = self.launcher.read(cx).backdrop.clone();
 
         // The root is deliberately *not* painted. It is the shadow margin, and
         // the window behind it is transparent — see the module docs. Giving it
@@ -947,15 +957,32 @@ impl Render for LauncherView {
                     .flex()
                     .flex_1()
                     .flex_col()
+                    .relative()
                     .rounded(px(PANEL_RADIUS))
                     .bg(theme.background)
                     .border_1()
                     .border_color(theme.border)
                     .shadow(theme.panel_shadows())
-                    // Clips the rows to the panel's radius. Without it the
-                    // scrolled list paints square corners over the rounded
-                    // ones at the top and bottom of the list.
+                    // Clips the rows *and* the backdrop to the panel's radius.
+                    // Without it the scrolled list paints square corners over
+                    // the rounded ones, and the captured desktop shows in the
+                    // corners as four hard squares.
                     .overflow_hidden()
+                    // The frosted desktop, stretched back up from the
+                    // downsampled capture. `absolute` with `inset_0` because it
+                    // is a backdrop: it fills the panel exactly, sits behind
+                    // everything, and must not participate in layout — as a
+                    // normal child it would push the search field down by its
+                    // own height.
+                    .when_some(backdrop, |panel, image| {
+                        panel.child(
+                            div().absolute().inset_0().child(
+                                img(ImageSource::Render(image))
+                                    .object_fit(ObjectFit::Fill)
+                                    .size_full(),
+                            ),
+                        )
+                    })
                     .child(self.search_field(theme, &focus, entity, telemetry))
                     .child(self.result_list(&rows, selected, theme, searching, error))
                     .child(Self::status_bar(
