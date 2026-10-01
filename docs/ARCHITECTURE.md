@@ -654,6 +654,51 @@ foreground=false`, the problem is z-order or activation, not lifecycle. If it
 says `visible=false`, the window was never shown. If the rect is empty or
 degenerate, it was moved somewhere it cannot be seen.
 
+## A Win32 error code names the *category*, not the call site
+
+`ERROR_RESOURCE_TYPE_NOT_FOUND` (1813) from the tray icon sent two rounds of
+investigation to `CreateWindowExW`, and the window had been working the whole
+time.
+
+The chain was three mistakes in one function, not one bug in one call:
+
+1. `load_icon` verified the stock icon with
+   `LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE)`. A size
+   of 0 plus `LR_DEFAULTSIZE` is not a reliable way to fetch a *system* icon;
+   `LoadIconW` is. The call fails, and it fails for environmental reasons — not
+   because anything is missing.
+2. That verification was **fatal**. But `hIcon: NULL` in `NOTIFYICONDATAW` makes
+   the shell draw its own default, which is exactly what
+   `TrayIconSource::Application` is asking for. A cosmetic difference in the icon
+   was taking down the entire tray.
+3. The error it returned was `WindowCreationFailed`. 1813 reads as "class not
+   found", so the message pointed at class registration and window creation, and
+   nobody read the function that actually failed.
+
+Two rules came out of it:
+
+- **A diagnostic that names the wrong thing is worse than none.** One enum
+  variant now covers exactly one failure: `ClassRegistrationFailed`,
+  `WindowCreationFailed`, `IconLoadFailed`, `NotifyFailed`. A name has to be
+  falsifiable by reading the failing function.
+- **An error code is a category, not a location.** 1813 is
+  "resource type not found", which is *consistent* with a missing class, a
+  missing icon resource, or a missing icon file. Reading it as proof of which
+  call failed is what wasted the time.
+
+The thing that actually found it was instrumenting the real function and
+printing the class name it was about to register. A replica test built outside
+the function could only have tested a guess: every variable — the class name
+format, `WS_POPUP` on and off, `HWND_MESSAGE` on and off, non-null `lpParam`, and
+running on a spawned thread — passed in isolation. Replicas prove a hypothesis
+about the variables you already suspect. When a bug survives that, suspect the
+function you have not read.
+
+Related: [`orca-win/src/tray.rs`](crates/orca-win/src/tray.rs) has
+`a_real_tray_icon_installs_and_uninstalls`, which exercises class, window, icon,
+and notify against the live shell. A mocked `Shell_NotifyIconW` cannot catch any
+of this, because the mock only ever runs the step *after* the one that broke.
+
 ## Window class names may not contain `(` or `)`
 
 `CreateWindowExW` failed with **ERROR_RESOURCE_TYPE_NOT_FOUND (1813)** — "the

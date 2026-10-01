@@ -47,8 +47,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, LoadImageW,
     PostQuitMessage, PostThreadMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
     TrackPopupMenuEx, TranslateMessage, UnregisterClassW, CREATESTRUCTW, GWLP_USERDATA, HICON,
-    HMENU, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING,
-    MSG, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
+    HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, MSG,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
     WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_QUIT, WM_RBUTTONUP,
     WNDCLASSW,
 };
@@ -58,8 +58,34 @@ use crate::wide::{copy_wide_fixed, wide_nul};
 /// Something went wrong driving the tray icon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayError {
-    /// The hidden message window or its class could not be created.
+    /// The window **class** could not be registered.
+    ///
+    /// Split from [`TrayError::WindowCreationFailed`] because the two used to
+    /// share one variant and one message, which is a diagnostic that names
+    /// neither: a failure here says the *class* is unusable, and a failure
+    /// there says the class was fine and the *window* was not. Conflating them
+    /// sent the previous investigation at `CreateWindowExW` — where
+    /// `ERROR_RESOURCE_TYPE_NOT_FOUND` reads as "class not found", which is
+    /// exactly the wrong place to look when the class registered a microsecond
+    /// earlier.
+    ClassRegistrationFailed {
+        /// The raw Win32 error code, as `GetLastError()` reported it.
+        code: u32,
+        /// The class name that was rejected.
+        class: String,
+    },
+    /// The hidden message window could not be created.
     WindowCreationFailed {
+        /// The raw Win32 error code, as `GetLastError()` reported it.
+        code: u32,
+    },
+    /// A file-backed icon could not be loaded.
+    ///
+    /// Only reachable for [`TrayIconSource::File`]. The stock application icon
+    /// cannot reach here: it is never loaded, so it cannot fail to load.
+    IconLoadFailed {
+        /// The path that was rejected.
+        path: std::path::PathBuf,
         /// The raw Win32 error code, as `GetLastError()` reported it.
         code: u32,
     },
@@ -84,10 +110,23 @@ pub enum TrayError {
 impl fmt::Display for TrayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            TrayError::ClassRegistrationFailed { code, class } => {
+                write!(
+                    f,
+                    "tray window class {class:?} could not be registered (Win32 error {code})"
+                )
+            }
             TrayError::WindowCreationFailed { code } => {
                 write!(
                     f,
                     "tray message window could not be created (Win32 error {code})"
+                )
+            }
+            TrayError::IconLoadFailed { path, code } => {
+                write!(
+                    f,
+                    "tray icon could not be loaded from {} (Win32 error {code})",
+                    path.display()
                 )
             }
             TrayError::NotifyFailed { operation, code } => {
@@ -334,9 +373,20 @@ fn pump_body(spec: TraySpec, events: Sender<TrayEvent>, ready: Sender<Result<u32
     // strings point at NUL-terminated buffers that outlive the call. The wndproc
     // is a plain `extern "system"` function, so the vtable entry is valid for
     // the process lifetime.
+    // `SetLastError(0)` *before* the call, so that a failure reads the error
+    // `RegisterClassW` set rather than whatever the last unrelated Win32 call
+    // left behind. Placed after the call it would wipe the real error instead.
+    //
+    // SAFETY: `SetLastError` takes a plain value, has no preconditions and
+    // affects only this thread's error slot.
+    unsafe { windows::Win32::Foundation::SetLastError(windows::Win32::Foundation::WIN32_ERROR(0)) };
     if unsafe { RegisterClassW(&window_class) } == 0 {
-        let _ = ready.send(Err(TrayError::WindowCreationFailed {
-            code: unsafe { windows::Win32::Foundation::GetLastError() }.0,
+        // SAFETY: read back immediately after the call that failed, on the same
+        // thread, before anything else can run.
+        let code = unsafe { windows::Win32::Foundation::GetLastError() }.0;
+        let _ = ready.send(Err(TrayError::ClassRegistrationFailed {
+            code,
+            class: class_name.clone(),
         }));
         return;
     }
@@ -708,24 +758,25 @@ unsafe fn show_menu(hwnd: HWND, menu: &[TrayMenuItem]) -> Option<String> {
 /// it. Only a file-backed icon is owned by this thread.
 fn load_icon(source: &TrayIconSource) -> Result<Option<HICON>, TrayError> {
     match source {
-        TrayIconSource::Application => {
-            // Verified on purpose, not used: if the shared icon cannot be
-            // loaded the shell still draws a default, so there is no reason to
-            // own a handle we must not destroy. Checking it here turns "the icon
-            // is silently missing" into a reported error.
-            // SAFETY: a null module asks for the system icon; the
-            // MAKEINTRESOURCE constant is the documented way to name one.
-            let probe =
-                unsafe { LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE) };
-            if probe.is_err() {
-                return Err(TrayError::WindowCreationFailed {
-                    code: crate::single_instance::last_error_code(
-                        &probe.expect_err("checked above"),
-                    ),
-                });
-            }
-            Ok(None)
-        }
+        // No probe, deliberately. This used to verify the stock icon with
+        // `LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE)`
+        // and returned a fatal error if that failed — which it does here, with
+        // `ERROR_RESOURCE_TYPE_NOT_FOUND`. Two things were wrong with it:
+        //
+        // 1. `LoadImageW` with a size of 0 and `LR_DEFAULTSIZE` is not a
+        //    reliable way to fetch a system icon; `LoadIconW` is. The failure
+        //    is environmental, not a missing resource.
+        // 2. Making it fatal was the real defect. Passing `hIcon: NULL` to
+        //    `NOTIFYICONDATAW` makes the shell draw its own default, which is
+        //    precisely what `TrayIconSource::Application` asks for. A cosmetic
+        //    difference in the icon therefore took down the whole tray.
+        //
+        // It is worth recording because the diagnostic pointed somewhere else
+        // entirely: the error was reported as `WindowCreationFailed`, and
+        // `ERROR_RESOURCE_TYPE_NOT_FOUND` (1813) reads as "class not found",
+        // so every earlier investigation went to `CreateWindowExW` — which had
+        // been working the whole time.
+        TrayIconSource::Application => Ok(None),
         TrayIconSource::File(path) => {
             let wide = crate::wide::wide_path_nul(path);
             // SAFETY: `wide` is a NUL-terminated buffer that outlives the call.
@@ -744,7 +795,8 @@ fn load_icon(source: &TrayIconSource) -> Result<Option<HICON>, TrayError> {
                 // SAFETY: LoadImageW with LR_LOADFROMFILE returns a handle the
                 // caller owns and must release with DestroyIcon.
                 Ok(handle) => Ok(Some(HICON(handle.0))),
-                Err(e) => Err(TrayError::WindowCreationFailed {
+                Err(e) => Err(TrayError::IconLoadFailed {
+                    path: path.clone(),
                     code: crate::single_instance::last_error_code(&e),
                 }),
             }
@@ -1036,5 +1088,58 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("NIM_ADD"), "{message}");
         assert!(message.contains('5'), "{message}");
+    }
+
+    /// Installs a real tray icon against the live shell and removes it again.
+    ///
+    /// Every earlier tray bug in this file lived here and not in a unit test:
+    /// a mocked `Shell_NotifyIconW` cannot tell you that the message window
+    /// never got created, because the mock only ever exercised the call after
+    /// it. This one asserts the whole sequence end to end, so a future
+    /// regression in any of the four steps — class, window, icon, or notify —
+    /// fails as a real error string rather than as a silent missing icon.
+    #[test]
+    fn a_real_tray_icon_installs_and_uninstalls() {
+        let spec = TraySpec::new("orca-test", vec![TrayMenuItem::new("Quit", "quit")]);
+        let tray =
+            TrayIcon::install(spec).unwrap_or_else(|e| panic!("the tray icon must install: {e}"));
+        // A live icon has to be genuinely live, not merely constructed: an
+        // icon the shell never received is the failure this is here to catch.
+        assert!(
+            tray.is_live(),
+            "the icon was created but the shell dropped it"
+        );
+        assert_eq!(tray.is_live(), tray.is_live(), "is_live must be stable");
+    }
+
+    /// A file-backed icon must reach the same live state, and a bad path must
+    /// say *which* file failed rather than blaming the message window.
+    ///
+    /// The bug this pins down reported a missing icon file as a failure to
+    /// create the tray message window, which is why it was hunted for two
+    /// rounds in `CreateWindowExW` before anyone read the failing function.
+    #[test]
+    fn a_file_backed_icon_reports_its_own_failure() {
+        let missing = std::env::temp_dir().join("orca-no-such-icon-for-a-test.ico");
+        let spec = TraySpec {
+            tooltip: "orca-test-icon".to_owned(),
+            icon: TrayIconSource::File(missing),
+            menu: vec![TrayMenuItem::new("Quit", "quit")],
+        };
+        let error = match TrayIcon::install(spec) {
+            // SAFETY of the assumption: a missing file cannot yield a live icon,
+            // so anything but an error here is a bug worth failing on.
+            Ok(_) => panic!("a missing icon file must not install"),
+            Err(e) => e,
+        };
+        let message = error.to_string();
+        assert!(
+            matches!(error, TrayError::IconLoadFailed { .. }),
+            "an icon failure must not be reported as a window failure: {message}"
+        );
+        assert!(
+            message.contains("orca-no-such-icon-for-a-test.ico"),
+            "the error must name the file: {message}"
+        );
     }
 }

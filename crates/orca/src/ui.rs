@@ -1199,15 +1199,30 @@ impl LauncherView {
                                 })
                                 .child(row.item.title.clone()),
                         )
-                        .when_some(row.item.subtitle.clone(), |column, subtitle| {
-                            column.child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(11.))
-                                    .text_color(theme.dim)
-                                    .child(subtitle),
-                            )
-                        }),
+                        // The subtitle appears only on the selected row. Showing
+                        // it on every row meant 12 rows of metadata competing
+                        // with the one title the user is actually reading, and
+                        // the selection was easier to lose than to find.
+                        //
+                        // `ROW_HEIGHT` is fixed, so the row does not resize when
+                        // the subtitle comes and goes and the list does not
+                        // shift under the cursor as the selection moves.
+                        .when_some(
+                            if is_selected {
+                                row.item.subtitle.clone()
+                            } else {
+                                None
+                            },
+                            |column, subtitle| {
+                                column.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(theme.dim)
+                                        .child(subtitle),
+                                )
+                            },
+                        ),
                 )
                 .child(
                     div()

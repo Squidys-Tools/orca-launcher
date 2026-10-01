@@ -361,6 +361,15 @@ most cycles near 700 ms. That number is the baseline this change is supposed to
 beat, and it has not been re-measured on a real machine — the gate cannot do it
 and neither can I.
 
+> **Changed 2026-10-01: the backdrop capture no longer runs on the show path.**
+> `show` used to spend 20–50 ms in `BitBlt` plus the box blur between the
+> keystroke and the first frame. It now happens on the background executor at
+> startup and again after every hide, and `show` only paints the cached image.
+> The expected `paint N ms` figures should therefore drop noticeably against any
+> reading taken before this change. The trade is that the frosted backdrop can be
+> slightly stale — it shows what was behind the cursor when the popup *closed*,
+> not when it opened.
+
 The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
 (so it measures pixels, not window objects).
@@ -372,8 +381,14 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
    tenth. If the first is dramatically slower, the surface, font atlas, and
    entity tree really are being reused and the win is real. If the tenth is no
    faster than the first, the window is still being recreated; re-check 1a.
-2. Compare against the old baseline above and say so in the change notes.
-3. `paint --` means no measurement was taken, i.e. no `paint` ran after the
+2. **Very first open after launch.** There is no cached backdrop before
+   `run_gpui` finishes its startup capture, so if you press the hotkey
+   immediately on launch the panel may show a flat fill for one frame. Wait a
+   second first and confirm the frosted backdrop is there on every open. If it is
+   *never* there, the startup `prewarm_backdrop` is not running — please report
+   the log, which should show one `backdrop:` line at startup and one per hide.
+3. Compare against the old baseline above and say so in the change notes.
+4. `paint --` means no measurement was taken, i.e. no `paint` ran after the
    hotkey armed the telemetry. That is a bug in itself.
 
 ## 5. Memory
@@ -511,11 +526,16 @@ Windows does the thing.
 
 - [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
   handler runs, then unbind and confirm the combination is free again.
-- [ ] **The tray icon.** It has been broken and is now fixed but unverified. Look
-  for an orca icon in the notification area (may need the `^` overflow chevron).
+- [ ] **The tray icon.** The root cause is now known and fixed, and
+      `a_real_tray_icon_installs_and_uninstalls` installs against the live shell
+      in CI-less local test runs, so this is close to verified. Look for an orca
+      icon in the notification area (may need the `^` overflow chevron).
   - The line `tray icon unavailable: tray message window could not be created
-    (Win32 error 1813)` should be **gone** from the log. If it is still there, the
-    class-name fix did not work — please report it with the full log.
+    (Win32 error 1813)` should be **gone**. If it is still there, please report
+    it with the full log — but note that message was itself wrong once already:
+    the window was created fine and the *icon probe* was what failed. If the log
+    says `tray icon could not be loaded from <path>`, that is a different and
+    real problem.
   - Left-click should show the popup; right-click should open a menu with
     *Show orca* and *Quit*; *Quit* must exit the process.
   - The icon must survive 20 popup toggles. It used to be impossible to test this
@@ -595,11 +615,18 @@ So nobody assumes otherwise:
   `popover` element (`anchored()` only) with `ContextMenu` living in Zed's `ui`
   crate, which is not in the graph. The footer advertises *Open* and *Hide*
   only, because those bindings exist.
-- **The result rows are still noisy.** Every application row shows its full
-  executable path as a subtitle, and at this density the list is much busier
-  than the reference. The subtitle is not wrong — it is what tells you *which*
-  of four similarly-named things you are about to launch — but it wants to be
-  optional, or shown only for the selected row.
+- **The result rows were noisy — resolved 2026-10-01.** Every application row
+  used to show its full executable path as a subtitle, which at this density made
+  the list much busier than the reference and left the selection harder to find
+  than it should have. The subtitle now renders **only on the selected row**.
+  `ROW_HEIGHT` is fixed, so rows do not resize as the selection moves and the
+  list does not shift under the cursor.
+  - [ ] Open the launcher and arrow down through the results. Exactly one row
+        should show a path under its title, and it must be the highlighted one.
+  - [ ] Confirm the highlighted row does not change height as the selection
+        moves. Any vertical jitter here means `ROW_HEIGHT` stopped being fixed.
+  - [ ] If a result has no subtitle, the selected row must not gain a blank
+        second line.
 - **The five Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
   itemised, documented exception to the layering rule, quarantined in one file
   with the only `unsafe` in the crate, pending that crate being reopened.
