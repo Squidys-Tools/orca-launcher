@@ -26,8 +26,11 @@ path = "src/main.rs"
 # `Win32_Graphics_Gdi` is here for exactly one call, `MonitorFromPoint`, which is
 # how the popup finds the monitor under the cursor. It used to be inherited from
 # `orca-win`'s feature list, which meant this crate compiled only because it
-# happened to be built in the same graph as a crate that enabled it. A feature
-# another crate turns on is not a dependency.
+# happened to be built in the same graph as a crate that enabled it — so when
+# `orca-win` dropped the feature, the workspace build stayed green while
+# `cargo build -p orca` would have broken on its own. `orca-win` keeps the
+# feature too, for `WNDCLASSW` and `HICON`; both crates needing it is fine, and
+# is the only arrangement where neither depends on the other compiling.
 [dependencies]
 async-channel.workspace = true
 gpui.workspace = true

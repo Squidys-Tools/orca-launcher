@@ -638,6 +638,85 @@ calling thread, in a fixed order:
 6. `orca_win::activate` — the real foreground activation, which already carries
    the `AttachThreadInput` workaround the foreground lock requires.
 
+## One error message must name one failure
+
+The tray icon took four attempts and two wrong fixes, and the reason is a single
+design mistake: five different Win32 calls all reported
+`TrayError::WindowCreationFailed { code }`, which rendered as
+`"tray message window could not be created"`.
+
+Three of the five never had anything to do with creating a window. The real
+failure was `LoadImageW` on the stock app icon, reported as a window-creation
+error. The message was believed, so two rounds of debugging chased the window
+class and the `NIF_ICON` flag. Both were changed. Neither was the cause. The
+`WindowCreationFailed` variant is now `SetupFailed { at, code }`, where `at` is
+the call that failed (`"GetModuleHandleW"`, `"RegisterClassW"`, `"CreateWindowExW"`,
+`"LoadImageW (IDI_APPLICATION)"`, `"LoadImageW (file)"`). The same log line then
+identified the real cause on the next run.
+
+**A wrong error message is worse than no error message**, because it is believed
+and it sends the search somewhere specific. If one variant covers several
+failures, it is not one variant; it is a missing distinction. This is the same
+mistake as the popup logging "shown" after a successful `Entity::update`, in a
+different place.
+
+## The tray icon itself is still broken, for a third, separate reason
+
+Confirmed by log: `tray LoadImageW (IDI_APPLICATION) failed (Win32 error 1813)`.
+`ERROR_RESOURCE_TYPE_NOT_FOUND` from `LoadImageW` with a null module means the
+stock icon could not be resolved in this process at all. Not fixed.
+
+The obvious next step is to stop asking for a system icon and ship a real `.ico`
+in the repo, loaded via `LR_LOADFROMFILE`, which is a path this code already
+supports through `TrayIconSource::File`. That is untested at runtime, so it is
+recorded as the next thing to try rather than claimed as a fix.
+
+## Every way out needs more than one path
+
+Quit was reachable from exactly one place: the tray icon's *Quit* menu entry. The
+tray icon does not work, so the launcher had **no way to exit at all** other than
+killing it in Task Manager. A resident background process that cannot be stopped
+from its own UI is a bug in its own right, independent of the tray being broken.
+
+<kbd>Ctrl</kbd>+<kbd>Esc</kbd> now quits, as a `ui::Quit` action registered on
+the popup's dispatch chain alongside the other actions. Two details worth keeping:
+
+* It is bound to Ctrl+Esc rather than a bare Escape, because Escape is already
+  "hide" and a bare key that quits would collide with text input.
+* The handler calls the same `dismiss` path as hide before quitting. Under
+  `QuitMode::Explicit` the process does not exit when the last window closes, so
+  quitting without dismissing would leave the popup on screen.
+
+Wiring it needed three things that are easy to miss: declaring the action in
+`actions!`, adding an `on_quit` handler, **and** registering it with
+`.on_action(cx.listener(Self::on_quit))`. The macro only defines the struct — a
+handler with no listener is dead code, and clippy correctly refuses to let that
+ship.
+
+## A null `hIcon` with `NIF_ICON` set is a blank icon, not an error
+
+The tray icon never appeared, with no error reported. `Shell_NotifyIcon` was
+called with `NIF_ICON` in the flags and `hIcon` null, and Windows accepts that:
+it adds a notification-area entry it cannot draw. The visible result is an empty
+slot in the tray, which reads as "broken" rather than "missing".
+
+The cause was an over-cautious earlier decision. `load_icon` loaded the system
+icon *purely to check it could be loaded*, then returned `None` and dropped the
+handle, on the reasoning that the stock icon is a shared system resource that
+must never be destroyed. That reasoning was right about `DestroyIcon` and wrong
+about the rest: a shared handle can be used indefinitely, and the safe thing was
+to use it and simply never free it.
+
+Two rules now hold, and both are tested:
+
+* `NIF_ICON` is set only when there is a real handle. An entry the shell cannot
+  draw is worse than no entry, because the user sees something.
+* Icon ownership travels with the handle in `OwnedIcon`, which carries a
+  `destroyable` flag. `LoadImageW` on a `.ico` file is owned and released;
+  `LoadImageW` on `IDI_APPLICATION` is shared and never released. Three separate
+  `DestroyIcon` call sites previously each had to remember a rule the type did
+  not carry, which is how the shared handle was about to be freed.
+
 ## Log what you measured, not what you intended
 
 The reason this bug took two attempts is worth recording, because it is a
@@ -686,12 +765,35 @@ The chain was three mistakes in one function, not one bug in one call:
    found", so the message pointed at class registration and window creation, and
    nobody read the function that actually failed.
 
+### Both fixes at once, which is why neither error message was right
+
+A second line of work concluded from the other end: `load_icon` used to load the
+icon *purely as a check* and then return `None`, throwing the handle away, so
+`NIM_ADD` went out with `NIF_ICON` claimed and a null `hIcon`. The notification
+area got an entry the shell could not draw — a blank slot, with no error anywhere.
+
+Both diagnoses were right about their own half and neither was right overall:
+
+| | believed | actually |
+|---|---|---|
+| one line of work | the tray was fine, the *probe* was fatal | the tray was absent, and the probe was why |
+| the other | the icon had to be loaded for real | loading it must never be allowed to fail the install |
+
+So the resolved `load_icon` uses the call that works (`LoadIconW`) **and** refuses
+to be fatal: a failure returns `Ok(None)`, the caller declines `NIF_ICON`, and the
+shell draws its default. The accepted cost is that this one failure is now
+silent, which is the right way round — the alternative is a resident launcher
+whose only exit is a tray menu that did not appear.
+
 Two rules came out of it:
 
 - **A diagnostic that names the wrong thing is worse than none.** One enum
-  variant now covers exactly one failure: `ClassRegistrationFailed`,
-  `WindowCreationFailed`, `IconLoadFailed`, `NotifyFailed`. A name has to be
-  falsifiable by reading the failing function.
+  variant now covers exactly one failure: `SetupFailed { at, code }` names the
+  call, and `IconLoadFailed { path, code }` is separate because a path is the one
+  thing the person reading the log can act on. A name has to be falsifiable by
+  reading the failing function. `SetLastError(0)` runs before `RegisterClassW`,
+  because naming the failing call is only worth something if the code belongs to
+  it.
 - **An error code is a category, not a location.** 1813 is
   "resource type not found", which is *consistent* with a missing class, a
   missing icon resource, or a missing icon file. Reading it as proof of which

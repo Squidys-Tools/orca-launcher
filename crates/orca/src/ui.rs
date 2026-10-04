@@ -89,6 +89,13 @@ actions!(
         DeleteBack,
         /// Delete the character after the caret.
         DeleteForward,
+        /// Exit the process, hiding the popup first.
+        ///
+        /// The tray menu is the intended way to quit, but it is currently broken
+        /// (`LoadImageW` on the stock app icon fails), and a resident launcher
+        /// with no way to exit is worse than one extra keybinding. Bound to
+        /// <kbd>Ctrl</kbd>+<kbd>Esc</kbd> so it cannot collide with typing.
+        Quit,
     ]
 );
 
@@ -820,6 +827,16 @@ impl LauncherView {
         self.dismiss(window, cx);
     }
 
+    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        // Hide before quitting, so the process does not leave a visible window
+        // behind on its way out. Under `QuitMode::Explicit` this is the only
+        // thing keeping the window alive, and without it the popup would be
+        // destroyed rather than hidden, which is the path that used to break the
+        // retained-window design.
+        self.dismiss(window, cx);
+        cx.quit();
+    }
+
     fn on_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(-1, cx);
     }
@@ -939,6 +956,7 @@ impl Render for LauncherView {
             .p(px(FRAME_MARGIN))
             .text_color(theme.text)
             .on_action(cx.listener(Self::on_hide))
+            .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_previous))
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_activate))

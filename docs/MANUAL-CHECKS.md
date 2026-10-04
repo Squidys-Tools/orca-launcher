@@ -17,53 +17,27 @@ the log lines quoted below exist precisely so a failure has an unambiguous cause
 ## How to run
 
 ```powershell
-./tools/run.ps1
+./tools/run.ps1     # build, launch, and save the log to run.log
 ```
 
-That is the whole thing. It sets the GNU toolchain, stops a launcher left running
-from last time, builds only if a source file is newer than the binary, runs it,
-and writes `run.log`.
+That is the whole thing. It picks the right toolchain, stops any orca already
+running, builds, and tees the output to `run.log`. **You do not need the gate to
+run it.** The gate (`./tools/gate.ps1`) runs tests, formatting and lints; it is
+for checking a change, not for launching, and I run it before handing work over.
 
-Two shorter paths, for when you already know what you need:
+`run.log` matters. Every lifecycle decision below is logged, so most of these
+checks are answerable by reading it rather than by guessing from the screen.
 
-```powershell
-# already built — just run it, no cargo involved
-.\target\x86_64-pc-windows-gnu\debug\orca.exe
-```
-
-```powershell
-# if you must do it by hand, this is the one that works
-$env:PATH = "C:\Users\chris\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;C:\Users\chris\.cargo\bin;" + $env:PATH
-cargo run -p orca --target x86_64-pc-windows-gnu 2>&1 | Tee-Object run.log
-```
-
-A bare `cargo run -p orca` is the trap: it picks MSVC off `PATH`, which builds
-the wrong target.
-
-**Nothing appears on screen, and that is correct.** The launcher is resident with
-no window until summoned — press <kbd>Ctrl+Shift+Space</kbd>.
-
-**Trust the hotkey in the log, not this page.** The default is
-<kbd>Ctrl+Shift+Space</kbd>, but `config.toml` can change it and the `config:`
-line is the one true on your machine. These instructions were wrong for a while —
-they named <kbd>Ctrl+Alt+Space</kbd>, which the code has never shipped — and a
-person following them would have concluded the launcher was broken.
-
-**If the window does not open and you just changed something, check for a
-resident launcher.** It is a single-instance app: a second copy tells the first
-to show and exits with code 2, so the binary you just built never starts and the
-window belongs to the *old* one. `run.ps1` stops it for you; that is the most
-confusing way this app can appear not to have changed.
-
-`run.log` matters. Most of the checks below are answered by reading it rather
-than by looking at the screen.
+> If the build prints no `Compiling` lines and finishes instantly, nothing was
+> rebuilt and the binary may be stale. That is a bug, not a fast build — say so
+> rather than trusting the result.
 
 Startup must log, in roughly this order:
 
 ```
-[orca] config: hotkey Ctrl+Shift+Space, theme …, 50 result rows
+[orca] config: hotkey Ctrl+Alt+Space, theme …, 50 result rows
 [orca] providers: installed-apps, commands, env
-[orca] hotkey: Ctrl+Shift+Space registered
+[orca] hotkey: Ctrl+Alt+Space registered
 [orca] ready: resident, waiting for the hotkey
 ```
 
@@ -72,7 +46,7 @@ app is meant to start and stay usable with the hotkey, the tray, the catalogue,
 or the history database all missing. If one of those is the *only* way to reach
 the popup, that is a bug.
 
-## 1. The retained window — the foundation the rest of this sits on
+## 1. The retained window — the highest-risk thing in this change
 
 ### 1a. Reopening after Esc — please read the log, not just the screen
 
@@ -123,7 +97,7 @@ launcher was dead until you restarted it. Both paths now go through one
 
 1. Start the launcher. Wait for `ready: resident…`. No window is on screen; this
    is correct.
-2. Press <kbd>Ctrl+Shift+Space</kbd>. The popup appears and takes focus.
+2. Press <kbd>Ctrl+Alt+Space</kbd>. The popup appears and takes focus.
 3. Press <kbd>Esc</kbd>.
 4. **Expected:** the popup disappears, the process is still running, and the log
    gained exactly one line: `popup: hidden (window retained)`.
@@ -137,7 +111,7 @@ launcher was dead until you restarted it. Both paths now go through one
    something destroyed the window behind the launcher's back, and the next
    toggle has to rebuild it. Note which keypress produced it.
 
-5. Press <kbd>Ctrl+Shift+Space</kbd> again, three more times, alternating with
+5. Press <kbd>Ctrl+Alt+Space</kbd> again, three more times, alternating with
    <kbd>Esc</kbd>.
    **Expected:** every cycle logs `popup: shown (retained window)`. The word
    `created` must appear **exactly once** in the whole log, on the first toggle.
@@ -148,7 +122,7 @@ launcher was dead until you restarted it. Both paths now go through one
    `handle_window_visibility_changed`, which updates the visibility flag and
    requests *no frame*. Without an explicit `Window::refresh()` a re-shown popup
    sits on screen showing its last frame. So: type `note`, let the list fill,
-   press <kbd>Esc</kbd>, press <kbd>Ctrl+Shift+Space</kbd>.
+   press <kbd>Esc</kbd>, press <kbd>Ctrl+Alt+Space</kbd>.
    **Expected:** the query bar is empty and the list is back to the empty-query
    state, painted correctly. If you see the *previous* query and stale results,
    `refresh()` has stopped being called and that is the bug.
@@ -162,7 +136,7 @@ first.
 2. Press <kbd>Enter</kbd>.
    **Expected:** the program opens, the popup disappears, and the log says
    `popup: hidden (window retained)`.
-3. Press <kbd>Ctrl+Shift+Space</kbd> again.
+3. Press <kbd>Ctrl+Alt+Space</kbd> again.
    **Expected:** the popup reappears, empty and focused. If it does not, and
    nothing at all happens, you have the pre-fix bug: activation destroyed the
    retained window.
@@ -188,7 +162,7 @@ process runs out of handles.
 next, but "usually" is doing real work in that sentence.
 
 1. Click into Notepad and type something so you can see where focus is.
-2. <kbd>Ctrl+Shift+Space</kbd> to open the popup, then <kbd>Esc</kbd>.
+2. <kbd>Ctrl+Alt+Space</kbd> to open the popup, then <kbd>Esc</kbd>.
    **Expected:** focus returns to Notepad with the caret where you left it, and
    your next keystroke lands there. If focus lands somewhere arbitrary or on the
    desktop, that is a real defect in the hide path, not a nitpick — it is the
@@ -208,137 +182,57 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
-## 2. The frame: rounded corners and a floating panel
+### 1f. The frame, and an opaque panel
 
-**This is the highest-risk change in the project right now, because the gate
-cannot see any of it.** Everything below is one boolean, set once, at window
-creation, and it decides whether the launcher looks like the reference or looks
-like a black rectangle. Nothing in the test suite can observe it.
-
-The mechanism, in one sentence: the window is **transparent** and **larger than
-the panel**, and the panel is a rounded rect painted inside it. If the
-transparency does not composite, the margin around the panel is black and the
-launcher is worse-looking than before this change.
-
-### 2a. Is the margin around the panel actually see-through?
-
-1. Start the launcher, press <kbd>Ctrl+Shift+Space</kbd>.
-2. **Expected:** a rounded dark panel with a soft shadow under it, floating over
-   whatever is behind it. Around the panel — roughly 32px on every side — you
-   see the **desktop**, not black.
-
-The failure to look for: a **black square** the size of the whole window, with
-the panel drawn inside it. That means the swap chain's alpha is being ignored
-and the clear colour reached the screen. Say so in the report; the fix is one
-enum value in `main.rs` (`WindowOptions::window_background`) and it is a design
-decision, not a bug hunt.
-
-To get a proper read, put something with hard edges and high contrast behind the
-launcher first — a browser window with white and black areas, or the desktop
-wallpaper. A flat-coloured background hides a compositing failure completely.
-
-### 2b. Rounded corners
-
-- [ ] The panel's four corners are rounded, with a radius of roughly 16px. The
-      radius must be **visibly larger** than the radius on the selected row
-      inside it; if they look the same, the panel is not rounding.
-- [ ] **There must be no frame around the panel.** Not a border, not an outline,
-      not a rectangle of any kind outside the panel's own drop shadow. What you
-      should see is the panel, its shadow, and then straight through to the
-      desktop. Read the log:
-
-      ```
-      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
-      ```
-
-      | What the log says | What it means |
-      |---|---|
-      | `window frame cleared=true` | The frame removal was accepted by Windows. |
-      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. The frame will still be there. |
-      | `DWM corner rounding suppressed=false` | The attribute was rejected — expected below Windows 11, a defect on it. |
-
-      This is the highest-value line in the log for judging whether the popup
-      looks like a launcher or like a dialog, and it is a `false` on the first
-      line to look at when a 1px rectangle is visible around the panel.
-- [ ] Repeat at 125% and 150% scaling. A radius is in logical pixels, so it
-      should look the same physical size; if it looks chunky at 150%, the radius
-      is being applied in physical pixels somewhere.
-
-### 2c. The shadow
-
-- [ ] The panel casts a soft shadow, and the shadow is **not cut off** at the
-      window edge. This is what `ui::FRAME_MARGIN` is for; a hard straight edge
-      in the shadow means the margin is too small for the blur.
-- [ ] The shadow looks like two layers — a tight contact shadow and a wide soft
-      one — rather than one uniform grey halo. If it is a single flat ring, only
-      one of `Theme::panel_shadows`' two entries is being applied.
-
-### 2d. The panel is opaque
-
-**Changed 2026-10-03: there is no frosted backdrop.** The panel no longer
-captures the screen behind it, so nothing shows through the card. It is an
-opaque fill from the palette, and that is the whole behaviour.
+The panel is **opaque**. It does not capture the screen behind it, so nothing
+shows through the card — this changed 2026-10-03, when the frosted backdrop and
+the translucency were removed together. Nothing is photographed from the display
+any more either, which is worth knowing if you were avoiding the launcher for that
+reason.
 
 - [ ] Put a window full of text behind the launcher and press the hotkey.
       **Expected:** not one pixel of it is visible inside the panel. If the
       desktop shows through, `Theme::DARK.background.a` is no longer 1.0.
+- [ ] Around the panel — roughly 32px on every side — you see the **desktop**, not
+      black. A black square the size of the whole window means the swap chain's
+      alpha is being ignored. This is `WindowOptions::window_background` and it is
+      load-bearing.
+- [ ] **There must be no 1px frame around the panel**, and the corners are rounded
+      with a radius visibly larger than the selected row's. Read the log:
+      ```
+      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
+      ```
+      | What the log says | What it means |
+      |---|---|
+      | `window frame cleared=true` | The frame removal was accepted by Windows. |
+      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. |
+      | `DWM corner rounding suppressed=false` | Expected below Windows 11, a defect on it. |
+- [ ] The drop shadow is soft and **not cut off** at the window edge, and looks
+      like two layers rather than one grey halo. A hard straight edge means
+      `ui::FRAME_MARGIN` is too small for the 56px blur.
+- [ ] The tray shows a real icon, not a blank slot, and right-click → *Quit*
+      exits. Two separate bugs met here: a null `hIcon` gave a blank slot, and a
+      *fatal* icon load meant no tray at all — which on a resident app means no
+      way to quit. If the icon is blank, say so and paste the `tray:` lines.
 - [ ] No line mentioning `backdrop` appears in the log, at startup or on any
-      toggle. One is a leftover call site; `docs/ARCHITECTURE.md` records what
-      was removed and where.
-- [ ] The panel's corners are still **round** and the shadow still has room
-      around it. `overflow_hidden` on the panel is no longer load-bearing for a
-      captured image, but removing it puts square corners over the rounded ones.
+      toggle. One is a leftover call site.
 
-### 2e. The rest of the frame
-
-- [ ] The search field has a magnifier at the left and the placeholder reads
-      *Search for apps and commands…*. The magnifier is an inline SVG that
-      `gpui` rasterises into an **alpha mask** and tints with `Theme::dim`, so it
-      should be a flat dim grey. If it is a black blob or a missing-glyph box,
-      the SVG failed to parse — check the string constant `ui::MAGNIFIER`.
-- [ ] **Typing still works.** The `.track_focus(&focus)` call moved with the
-      restyle onto the search field's row, which is the nearest ancestor of the
-      input element. If it is ever left off that row, characters are dropped
-      with no error anywhere. This regression is silent, so type after every
-      layout change to that row.
-- [ ] Each row shows the source name on the **right** (`Application`, `File`,
-      …) and the title on the left. The old left-hand gutter tag (`app`, `file`)
-      is gone; that space went to the title.
-- [ ] The footer has two pills on the right, *Open · Enter* and *Hide · Esc*.
-      Both name bindings that exist. When nothing is selected the *Open* pill is
-      dimmed to 45% but does **not** change width — a reflowing footer twitches
-      on every arrow key.
-- [ ] The status line and the `paint N ms` readout are still present on the
-      **left** of the footer. Section 4 below depends on them, so if you removed
-      them, put them back.
-
-### 2f. The frame on a small display
-
-The window is 724×494 logical pixels, chosen so it fits a 1366×768 display at
-150% scaling (910×512 logical) — the tightest case still in use. A test asserts
-this, but the test cannot see what Windows does when a window is too big: it is
-**clamped to the work area**, which crops the panel rather than failing.
-
-- [ ] At 150% scaling on a 768-tall display: the whole panel is visible,
-      including the footer. If the footer is cut off, the height budget in
-      `ui::POPUP_HEIGHT` is over.
-
-## 4. Latency, now that the window is retained
+## 2. Latency, now that the window is retained
 
 The old create-and-destroy design measured 260–820 ms hotkey-to-first-paint,
 most cycles near 700 ms. That number is the baseline this change is supposed to
 beat, and it has not been re-measured on a real machine — the gate cannot do it
 and neither can I.
 
-> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
-> is gone (section 2d), so the `show` path no longer does any capture work — not
-> synchronously, not on the background executor. Every `paint N ms` reading taken
-> before this change included 20–50 ms of `BitBlt` plus box blur and is not a
-> baseline for the current build. Re-measure from scratch.
-
 The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
 (so it measures pixels, not window objects).
+
+> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
+> is gone (section 1f), so `show` no longer does any capture work — not
+> synchronously, not on the background executor. Every `paint N ms` reading taken
+> before that change included 20–50 ms of `BitBlt` plus box blur and is not a
+> baseline for the current build. Re-measure from scratch.
 
 1. Start the launcher, toggle it open ten times, and read the `paint N ms`
    figures off the status line each time.
@@ -347,15 +241,11 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
    tenth. If the first is dramatically slower, the surface, font atlas, and
    entity tree really are being reused and the win is real. If the tenth is no
    faster than the first, the window is still being recreated; re-check 1a.
-2. **Very first open after launch.** There is nothing to warm up any more — the
-   panel is painted from the palette — so the first toggle should be in the same
-   range as the rest. If it is dramatically slower, something is still being
-   built on the first open; report the log.
-3. Compare against the old baseline above and say so in the change notes.
-4. `paint --` means no measurement was taken, i.e. no `paint` ran after the
+2. Compare against the old baseline above and say so in the change notes.
+3. `paint --` means no measurement was taken, i.e. no `paint` ran after the
    hotkey armed the telemetry. That is a bug in itself.
 
-## 5. Memory
+## 3. Memory
 
 Previously observed 73 → 95 MB across ten create/destroy cycles, settling near
 88 MB. That was the *destroying* design, so it says almost nothing about the
@@ -369,7 +259,7 @@ retained one.
    moving. Take three readings a minute apart in the last five minutes — if they
    are still trending up, that is a leak and it is worth finding.
 
-## 6. Text input: the UTF-8 / UTF-16 caret
+## 4. Text input: the UTF-8 / UTF-16 caret
 
 `Window::handle_input` and every `EntityInputHandler` method speak **UTF-16 code
 units**. The model — `query` and `caret` — is a Rust `String` and a `usize`, so
@@ -419,7 +309,7 @@ Any caret in the wrong place after non-ASCII input is the UTF-8/UTF-16 mismatch,
 not a rendering bug, and it is worth a bug report with the exact character
 sequence that triggered it.
 
-## 7. The popup paints before results arrive
+## 5. The popup paints before results arrive
 
 Collection enumerates the Start Menu, opens a COM apartment, reads registry keys,
 walks directory trees, and reads SQLite. That runs on a `BackgroundExecutor` via
@@ -442,7 +332,7 @@ structural property (there is no code path from `render` to the filesystem) but
 - [ ] Esc, then reopen, and re-type the same query. **Expected:** identical row
       order (determinism). A reshuffle under the cursor is a bug.
 
-## 8. Ranking feel
+## 6. Ranking feel
 
 Unit-tested and green, but every weight is a product judgement that has never
 been judged by a person looking at a list.
@@ -462,7 +352,7 @@ been judged by a person looking at a list.
 - [ ] Check the status line wording: `3 matches` vs `50 of 400 matches` should
       read differently, and `searching...` should not stick once results land.
 
-## 9. Display, DPI, and multiple monitors
+## 7. Display, DPI, and multiple monitors
 
 The cursor-monitor lookup converts Win32 **physical** pixels to GPUI **logical**
 pixels using that monitor's effective DPI, because `PlatformDisplay::bounds()` is
@@ -483,23 +373,22 @@ it because the conversion depends on the real display configuration.
       reposition is not running.
 - [ ] Check the popup is exactly 640 logical px wide.
 
-## 10. `orca-win` platform calls
+## 8. `orca-win` platform calls
 
 Implemented and unit-tested, but the tests stop at the seam. A fake cannot prove
 Windows does the thing.
 
 - [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
   handler runs, then unbind and confirm the combination is free again.
-- [ ] **The tray icon.** The root cause is now known and fixed, and
-      `a_real_tray_icon_installs_and_uninstalls` installs against the live shell
-      in CI-less local test runs, so this is close to verified. Look for an orca
-      icon in the notification area (may need the `^` overflow chevron).
+- [ ] **<kbd>Ctrl</kbd>+<kbd>Esc</kbd> quits the process.** This exists because
+  the tray is the only other quit path and it is broken. Open the popup, press
+  Ctrl+Esc, and confirm the process exits rather than just hiding. Also confirm
+  the popup does not leave a stale window on screen on the way out.
+- [ ] **The tray icon.** It has been broken and is now fixed but unverified. Look
+  for an orca icon in the notification area (may need the `^` overflow chevron).
   - The line `tray icon unavailable: tray message window could not be created
-    (Win32 error 1813)` should be **gone**. If it is still there, please report
-    it with the full log — but note that message was itself wrong once already:
-    the window was created fine and the *icon probe* was what failed. If the log
-    says `tray icon could not be loaded from <path>`, that is a different and
-    real problem.
+    (Win32 error 1813)` should be **gone** from the log. If it is still there, the
+    class-name fix did not work — please report it with the full log.
   - Left-click should show the popup; right-click should open a menu with
     *Show orca* and *Quit*; *Quit* must exit the process.
   - The icon must survive 20 popup toggles. It used to be impossible to test this
@@ -524,17 +413,16 @@ Windows does the thing.
       **and** something from App Paths, and must not stall the popup (it runs on
       the background executor).
 
-## 11. What the gate covers, and what it cannot
+## 9. What the gate covers, and what it cannot
 
 So you do not have to re-derive this:
 
-| Covered by the gate (422 tests, clippy `-D warnings`) | Not covered |
+| Covered by the gate (395 tests, clippy `-D warnings`) | Not covered |
 |---|---|
 | Every UTF-16 ⇄ UTF-8 conversion, over six sample strings at every index | Whether Win32 and the IME send those indices |
 | The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results land |
 | Backspace/delete at every caret position of every sample | Whether the window is really retained, or merely logged as such |
 | The hide decision table (`hide_plan`) | Whether `ShowWindow(SW_HIDE)` hands focus back |
-| **Panel contrast, composited against the opaque panel** | **Whether the panel is opaque at all — section 2a** |
 | `InstalledApp` → `RawResult` field-for-field | Whether `installed_apps()` returns a good list on *your* machine |
 | The `DirectoryLister` against the real filesystem | Whether the popup is on the right monitor at your DPI |
 | Argument quoting, `PATH` resolution, hotkey spec parsing | Anything about latency, memory, or feel |
@@ -547,7 +435,7 @@ feature, which enables the Wayland and X11 backends. That is why the risky logic
 was moved out of the trait methods into the pure functions in
 `crates/orca/src/text.rs` and the pure `hide_plan` — so it could be tested at
 all. The thin GPUI adapters left behind are therefore unverified by
-construction, and section 1 and section 6 above are where you check them.
+construction, and section 1 and section 4 above are where you check them.
 
 ## Not built yet
 
@@ -555,7 +443,7 @@ So nobody assumes otherwise:
 
 - **The frosted backdrop is deferred, deliberately.** The panel is opaque and
   nothing is captured from the screen — which also means the launcher no longer
-  photographs part of the display on every hotkey press. See section 2d.
+  photographs part of the display on every hotkey press. See section 1f.
 - **Multi-monitor and DPI are untested at runtime.** The selection logic is
   unit-tested; the DPI conversion is not tested anywhere.
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system
@@ -564,35 +452,7 @@ So nobody assumes otherwise:
 - **No result icons, no fuzzy-match tuning UI, no config file of your own.**
   `[files]` and `[commands]` come from `config.toml`; the launcher falls back to
   defaults with a `config.toml … unavailable` line if it cannot read one.
-- **A real `Ctrl+A`.** See section 6.
-- **No section headers and no favourites.** The reference groups rows under
-  "Favorites" / "Applications". Grouping by `Source` was left out on purpose:
-  the ranked list interleaves sources, so contiguous-run grouping would produce
-  a dozen one-row headers, and grouping *all* rows by source would silently
-  re-order the list against the frecency ranking the policy is built on. The
-  right-hand per-row source label carries the same information without
-  reordering anything.
-- **No app icons, and therefore no shortcut chips.** `crates/orca-win/src/apps.rs`
-  is explicit that it is not an icon loader. The chips in the reference are
-  trivial to draw and useless without a shortcut registry, and no binding
-  exists for them yet, so neither is drawn — a chip advertising a shortcut
-  nothing handles is worse than no chip.
-- **No actions menu.** `Ctrl+K` is not bound, and gpui at this pin has no
-  `popover` element (`anchored()` only) with `ContextMenu` living in Zed's `ui`
-  crate, which is not in the graph. The footer advertises *Open* and *Hide*
-  only, because those bindings exist.
-- **The result rows were noisy — resolved 2026-10-01.** Every application row
-  used to show its full executable path as a subtitle, which at this density made
-  the list much busier than the reference and left the selection harder to find
-  than it should have. The subtitle now renders **only on the selected row**.
-  `ROW_HEIGHT` is fixed, so rows do not resize as the selection moves and the
-  list does not shift under the cursor.
-  - [ ] Open the launcher and arrow down through the results. Exactly one row
-        should show a path under its title, and it must be the highlighted one.
-  - [ ] Confirm the highlighted row does not change height as the selection
-        moves. Any vertical jitter here means `ROW_HEIGHT` stopped being fixed.
-  - [ ] If a result has no subtitle, the selected row must not gain a blank
-        second line.
-- **The five Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
+- **A real `Ctrl+A`.** See section 4.
+- **The four Win32 calls in `src/win.rs` belong in `orca-win`.** They are an
   itemised, documented exception to the layering rule, quarantined in one file
   with the only `unsafe` in the crate, pending that crate being reopened.
