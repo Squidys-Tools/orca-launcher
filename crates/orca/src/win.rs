@@ -290,7 +290,7 @@ pub fn round_corners(hwnd: HWND) -> bool {
 /// Both are then read back with `DwmGetWindowAttribute` and reported. If the
 /// read-back says the border colour is `none` and a frame is *still* visible,
 /// the frame is not DWM's, and the next place to look is our own painting —
-/// specifically whether the backdrop is escaping the panel's clip.
+/// specifically whether the panel's fill is escaping its rounded clip.
 pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
     // SAFETY: `hwnd` is a live window this process owns. Each call passes a
     // pointer to exactly as many bytes of live, initialised local storage as it
@@ -467,31 +467,11 @@ pub fn logical_cursor() -> Option<(f32, f32)> {
     Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
 }
 
-/// The cursor's position in **physical** pixels, plus the scale factor of the
-/// monitor it is on.
-///
-/// The scale factor is needed on its own for the backdrop capture, which asks
-/// Win32 for physical pixels while every number GPUI hands out is logical.
-/// There is no way to get it from `PlatformDisplay` at this rev —
-/// `scale_factor()` lives on `PlatformWindow`, and the first show happens before
-/// there is a window — so it is read from the monitor directly, by the same
-/// call that makes the logical/physical conversion correct in the first place.
-///
-/// Returning the physical position alongside means the capture and the
-/// placement are guaranteed to be talking about the same monitor and the same
-/// point, rather than each doing its own cursor read and hoping they agree.
-#[must_use]
-pub fn cursor_physical_and_scale() -> Option<((i32, i32), f32)> {
-    let (point, _, scale_x, _) = cursor_geometry()?;
-    Some(((point.x, point.y), scale_x))
-}
-
 /// The cursor, and the effective DPI of its monitor, in one trip to Win32.
 ///
-/// Shared by [`logical_cursor`] and [`cursor_physical_and_scale`] because they
-/// must agree: two independent cursor reads can land on different monitors when
-/// the pointer crosses a seam between them, and the popup would then be placed
-/// on one display and its backdrop sampled from another.
+/// One call because the cursor position and the scale that interprets it have to
+/// come from the same moment: two independent reads can land on different
+/// monitors when the pointer crosses a seam between them.
 fn cursor_geometry() -> Option<(POINT, HMONITOR, f32, f32)> {
     // SAFETY: `GetCursorPos` takes an out-pointer and has no preconditions.
     let mut point = POINT { x: 0, y: 0 };

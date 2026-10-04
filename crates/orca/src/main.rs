@@ -42,7 +42,6 @@
 //! development. What keeps the process meaningful with zero windows open is the
 //! hotkey thread and the tray icon.
 
-mod backdrop;
 mod catalog;
 mod launch;
 mod providers;
@@ -353,20 +352,6 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
         let pump_launcher = launcher.clone();
         let pump_telemetry = Arc::clone(&telemetry);
         cx.spawn(async move |cx| {
-            // Warm the first backdrop here, at startup, rather than on the first
-            // `show`. The window does not exist yet, so the capture is safe, and
-            // there is no user waiting on it. This is what lets `show` never
-            // capture: by the time a hotkey is pressed the image is already
-            // sitting in `launcher.backdrop`.
-            //
-            // Without it the very first open would paint a flat fill, which
-            // would look like the frosted-glass work had been reverted.
-            let warm = cx.update(|app| {
-                let display = win::display_under_cursor(app);
-                Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
-            });
-            prewarm_backdrop(&pump_launcher, warm, cx);
-
             while let Ok(command) = pump_rx.recv().await {
                 match command {
                     UiCommand::Toggle => toggle(&pump_launcher, &pump_telemetry, cx),
@@ -425,11 +410,9 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         // construction. Repositioned first, because a monitor may have been
         // unplugged while the popup was hidden.
         //
-        // No backdrop work happens here. `prewarm_backdrop` filled
-        // `launcher.backdrop` from the previous hide, so this path is only
-        // reposition, paint, activate — which is what makes the popup feel
-        // instant. The cost of a cold cache is a flat fill for one frame, not a
-        // 40ms stall in front of the user; see `prewarm_backdrop`.
+        // Nothing here touches the frame's contents. The panel is an opaque
+        // fill painted from the palette, so a show is reposition, paint,
+        // activate and nothing else.
         let shown = cx.update(|app| {
             let outcome = window.update(app, |_, window, cx| {
                 place_on_cursor(window, cx);
@@ -515,10 +498,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         let display = win::display_under_cursor(app);
         Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
     });
-    // The backdrop is already warm: `run_gpui` captures it at startup and
-    // `hide` refreshes it after every close, so neither path has to wait for a
-    // capture here. Building the window is the only work left on the first
-    // open.
+    // Building the window is the only work left on the first open.
     let create = cx.update(|app| {
         let entity = launcher.clone();
         let bounds = first_bounds;
@@ -611,19 +591,9 @@ fn hide(launcher: &Entity<Launcher>, cx: &mut AsyncApp) {
     let action = cx.update(|app| launcher.update(app, |launcher, _| launcher.hide()));
 
     match action {
-        // Both arms below end with the window hidden, which is the only moment
-        // a screen capture is safe — so this is where the next open's backdrop
-        // gets taken. On `Retained` it is the common case; on `DestroyWindow`
-        // there is no window left to show next time, so it is captured when the
-        // window is rebuilt instead.
-        HideAction::Retained => {
-            let bounds = cx.update(|app| {
-                let display = win::display_under_cursor(app);
-                Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
-            });
-            prewarm_backdrop(launcher, bounds, cx);
-            log("popup: hidden (window retained)");
-        }
+        // Both arms below end with the window hidden. Which one ran matters
+        // only because `DestroyWindow` leaves nothing to show next time.
+        HideAction::Retained => log("popup: hidden (window retained)"),
         HideAction::NothingShown => log("popup: hide requested while nothing was shown"),
         HideAction::DestroyWindow => {
             // Taken and destroyed in separate `update` calls so the handle is
@@ -690,54 +660,6 @@ fn spawn_command_pump(
         })
         .map_err(|error| degraded("command pump thread", error))
         .ok();
-}
-
-/// Captures the frosted backdrop for the panel that is about to appear, and
-/// stores it for the next `show`.
-///
-/// Must be called while the popup window is **hidden**, because `BitBlt`
-/// photographs the screen and would otherwise photograph the popup. That is
-/// why this runs from `hide` rather than from `show`.
-///
-/// The capture is the expensive part of opening a launcher — 20-50ms for the
-/// `BitBlt` plus the box blur — and it used to be paid between the keystroke and
-/// the first frame, which is the worst place to pay it: it is invisible time,
-/// added directly to how fast the popup feels. Moving it here makes it free on
-/// the path the user is waiting on, at the cost of the backdrop being a little
-/// stale: it shows what was behind the cursor at *hide* time, not at show time.
-///
-/// That trade is deliberate. A frosted panel showing slightly old content is
-/// not noticeable; a launcher that opens 40ms late is.
-///
-/// The work is split across two executors because `BitBlt` is a blocking Win32
-/// call and the blur is CPU work: neither belongs on the foreground executor,
-/// where it would stall rendering. Only the final `launcher.update` comes back
-/// to the foreground, because that is the only part that touches shared state.
-fn prewarm_backdrop(
-    launcher: &Entity<Launcher>,
-    target: gpui::Bounds<gpui::Pixels>,
-    cx: &mut AsyncApp,
-) {
-    let scale = win::cursor_physical_and_scale().map_or(1.0, |(_, scale)| scale);
-    let capture = cx
-        .background_executor()
-        .spawn(async move { crate::backdrop::capture(target, scale) });
-    let launcher = launcher.clone();
-    cx.spawn(async move |cx| {
-        let backdrop = capture.await;
-        log(&format!(
-            "backdrop: {} in {:.1} ms at {}x scaling (captured while hidden)",
-            if backdrop.image.is_some() {
-                "captured and blurred"
-            } else {
-                "unavailable, falling back to a flat fill"
-            },
-            backdrop.took_ms,
-            scale
-        ));
-        cx.update(|app| launcher.update(app, |launcher, _| launcher.backdrop = backdrop.image));
-    })
-    .detach();
 }
 
 /// Moves the popup to the cursor's monitor, centred in its work area.

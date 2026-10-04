@@ -208,7 +208,7 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
-## 2. The frame: blur, rounded corners, and a floating panel
+## 2. The frame: rounded corners and a floating panel
 
 **This is the highest-risk change in the project right now, because the gate
 cannot see any of it.** Everything below is one boolean, set once, at window
@@ -273,54 +273,23 @@ wallpaper. A flat-coloured background hides a compositing failure completely.
       one — rather than one uniform grey halo. If it is a single flat ring, only
       one of `Theme::panel_shadows`' two entries is being applied.
 
-### 2d. The frosted backdrop
+### 2d. The panel is opaque
 
-The panel is translucent *and* blurred: on every show the launcher captures the
-screen region behind the panel, blurs it, and paints it inside the panel under
-the translucent fill. So what shows through should be the desktop,
-recognisably shaped, with no readable text.
+**Changed 2026-10-03: there is no frosted backdrop.** The panel no longer
+captures the screen behind it, so nothing shows through the card. It is an
+opaque fill from the palette, and that is the whole behaviour.
 
-- [ ] Open the launcher over a window with a lot of text. **Expected:** you can
-      tell roughly *what* is behind it — light and dark areas, an image — but
-      not one readable word. Legible text behind the panel means the blur is not
-      running.
-- [ ] Every show prints exactly one line about it:
-      ```
-      backdrop: captured and blurred in 3.2 ms at 1x scaling
-      ```
+- [ ] Put a window full of text behind the launcher and press the hotkey.
+      **Expected:** not one pixel of it is visible inside the panel. If the
+      desktop shows through, `Theme::DARK.background.a` is no longer 1.0.
+- [ ] No line mentioning `backdrop` appears in the log, at startup or on any
+      toggle. One is a leftover call site; `docs/ARCHITECTURE.md` records what
+      was removed and where.
+- [ ] The panel's corners are still **round** and the shadow still has room
+      around it. `overflow_hidden` on the panel is no longer load-bearing for a
+      captured image, but removing it puts square corners over the rounded ones.
 
-      | What the log says | What it means |
-      |---|---|
-      | `captured and blurred in N ms` | Working. `N` is the real cost on the keystroke path. |
-      | `unavailable, falling back to a flat fill` | The capture or blur was refused. The launcher still opens — deliberately not fatal — but the panel is a flat tint. The Win32 error is swallowed, so just report the line. |
-      | No `backdrop:` line at all | The show path is not calling it. |
-      | `at 2x scaling`, and the blur is offset toward the panel's top-left | The physical/logical conversion scaled the size but not the position. |
-
-- [ ] **Check the cost.** The whole reason this blurs a downsampled copy is that
-      it is cheap. If `N` is much above 20 ms it is competing with the reason
-      the launcher exists, and the fix is to lower
-      `orca_core::backdrop::DOWNSAMPLE`, not to accept it.
-- [ ] The blur must **follow the panel**. Move the mouse to another monitor and
-      press the hotkey: the backdrop must be sampled from *that* monitor. Show
-      the previous monitor's wallpaper and the placement and the capture are
-      disagreeing about where the cursor is.
-- [ ] At 125% and 150% scaling the blur must still line up with the panel.
-- [ ] The panel's corners must still be **round**. The backdrop is clipped to
-      the panel; four hard square corners of desktop inside a rounded panel
-      means `overflow_hidden` was removed from the panel.
-
-### 2e. It really does capture the screen — know that
-
-The backdrop comes from GDI `BitBlt` off the screen DC, so it photographs
-whatever is in that rectangle at that moment. There is no consent dialog and
-nothing is stored: the buffer is blurred, painted once, and replaced on the
-next show. But it does mean the launcher can photograph part of the screen — a
-password manager, a video call — every time the hotkey is pressed. If that is
-unacceptable on a particular machine, the capture is one function
-(`orca_win::capture_screen_region`) and removing it returns the launcher to a
-flat translucent panel.
-
-### 2f. The rest of the frame
+### 2e. The rest of the frame
 
 - [ ] The search field has a magnifier at the left and the placeholder reads
       *Search for apps and commands…*. The magnifier is an inline SVG that
@@ -343,7 +312,7 @@ flat translucent panel.
       **left** of the footer. Section 4 below depends on them, so if you removed
       them, put them back.
 
-### 2g. The frame on a small display
+### 2f. The frame on a small display
 
 The window is 724×494 logical pixels, chosen so it fits a 1366×768 display at
 150% scaling (910×512 logical) — the tightest case still in use. A test asserts
@@ -361,14 +330,11 @@ most cycles near 700 ms. That number is the baseline this change is supposed to
 beat, and it has not been re-measured on a real machine — the gate cannot do it
 and neither can I.
 
-> **Changed 2026-10-01: the backdrop capture no longer runs on the show path.**
-> `show` used to spend 20–50 ms in `BitBlt` plus the box blur between the
-> keystroke and the first frame. It now happens on the background executor at
-> startup and again after every hide, and `show` only paints the cached image.
-> The expected `paint N ms` figures should therefore drop noticeably against any
-> reading taken before this change. The trade is that the frosted backdrop can be
-> slightly stale — it shows what was behind the cursor when the popup *closed*,
-> not when it opened.
+> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
+> is gone (section 2d), so the `show` path no longer does any capture work — not
+> synchronously, not on the background executor. Every `paint N ms` reading taken
+> before this change included 20–50 ms of `BitBlt` plus box blur and is not a
+> baseline for the current build. Re-measure from scratch.
 
 The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
@@ -381,12 +347,10 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
    tenth. If the first is dramatically slower, the surface, font atlas, and
    entity tree really are being reused and the win is real. If the tenth is no
    faster than the first, the window is still being recreated; re-check 1a.
-2. **Very first open after launch.** There is no cached backdrop before
-   `run_gpui` finishes its startup capture, so if you press the hotkey
-   immediately on launch the panel may show a flat fill for one frame. Wait a
-   second first and confirm the frosted backdrop is there on every open. If it is
-   *never* there, the startup `prewarm_backdrop` is not running — please report
-   the log, which should show one `backdrop:` line at startup and one per hide.
+2. **Very first open after launch.** There is nothing to warm up any more — the
+   panel is painted from the palette — so the first toggle should be in the same
+   range as the rest. If it is dramatically slower, something is still being
+   built on the first open; report the log.
 3. Compare against the old baseline above and say so in the change notes.
 4. `paint --` means no measurement was taken, i.e. no `paint` ran after the
    hotkey armed the telemetry. That is a bug in itself.
@@ -570,8 +534,7 @@ So you do not have to re-derive this:
 | The edit transitions, at every index pair × 5 replacement strings | Whether the popup paints before results land |
 | Backspace/delete at every caret position of every sample | Whether the window is really retained, or merely logged as such |
 | The hide decision table (`hide_plan`) | Whether `ShowWindow(SW_HIDE)` hands focus back |
-| **Panel contrast, composited over both a white and a black backdrop** | **Whether the window composites alpha at all — section 2a** |
-| **Blur maths: edge opacity, spread, and the 16× cost reduction** | **Whether the capture lines up with the panel at your DPI — section 2d** |
+| **Panel contrast, composited against the opaque panel** | **Whether the panel is opaque at all — section 2a** |
 | `InstalledApp` → `RawResult` field-for-field | Whether `installed_apps()` returns a good list on *your* machine |
 | The `DirectoryLister` against the real filesystem | Whether the popup is on the right monitor at your DPI |
 | Argument quoting, `PATH` resolution, hotkey spec parsing | Anything about latency, memory, or feel |
@@ -590,6 +553,9 @@ construction, and section 1 and section 6 above are where you check them.
 
 So nobody assumes otherwise:
 
+- **The frosted backdrop is deferred, deliberately.** The panel is opaque and
+  nothing is captured from the screen — which also means the launcher no longer
+  photographs part of the display on every hotkey press. See section 2d.
 - **Multi-monitor and DPI are untested at runtime.** The selection logic is
   unit-tested; the DPI conversion is not tested anywhere.
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system

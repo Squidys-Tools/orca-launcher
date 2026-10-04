@@ -23,17 +23,16 @@ path = "src/main.rs"
 # not free — each namespace is a link-time import the GNU linker resolves — so
 # it names the one call and nothing wider.
 #
-# `image` is here for one type: `image::Frame`, which is what
-# `gpui::RenderImage::new` takes. gpui does not re-export `image`, so there is no
-# way to hand it a decoded screen capture without naming the crate. It is
-# already in the graph through gpui and is already compiled, so this adds no
-# build cost — it adds a direct dependency edge and nothing else.
+# `Win32_Graphics_Gdi` is here for exactly one call, `MonitorFromPoint`, which is
+# how the popup finds the monitor under the cursor. It used to be inherited from
+# `orca-win`'s feature list, which meant this crate compiled only because it
+# happened to be built in the same graph as a crate that enabled it. A feature
+# another crate turns on is not a dependency.
 [dependencies]
 async-channel.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
-image = { version = "0.25", default-features = false }
 orca-core = { path = "../orca-core" }
 orca-win = { path = "../orca-win" }
 raw-window-handle = "0.6.2"
-windows = { workspace = true, features = ["Win32_Graphics_Dwm"] }
+windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }

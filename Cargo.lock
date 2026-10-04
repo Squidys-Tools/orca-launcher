@@ -3753,7 +3753,6 @@ dependencies = [
  "async-channel",
  "gpui",
  "gpui_platform",
- "image",
  "orca-core",
  "orca-win",
  "raw-window-handle",

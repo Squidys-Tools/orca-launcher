@@ -12,22 +12,26 @@
 //! "is this app light or dark right now", so it also follows the user changing
 //! their theme while the launcher is running, and it costs no Win32 call.
 //!
-//! # The panel is translucent, and that changes what "contrast" means
+//! # What "contrast" is measured against
 //!
-//! The popup is a rounded panel floating over the desktop, so the background
-//! is an alpha-blended fill rather than an opaque colour. A contrast check
-//! against the fill's own RGB is then meaningless: the colour the user actually
-//! sees is that fill composited over whatever is behind the window, and a
-//! `rgba(10, 10, 13, 0.88)` panel over a white wallpaper is a mid grey, not
-//! black.
+//! The panel is **opaque**, so its own RGB is the colour the user sees and a
+//! contrast check needs no help. What is *not* opaque is everything painted on
+//! top of it: the selection fill, the footer pills, the border. Those are
+//! alpha-blended over the panel, and a `10%`-white selection over a near-black
+//! panel is a slightly lighter near-black — which is what makes a highlighted
+//! row readable, and is also why checking the selection's raw RGB against the
+//! text would score a number about nothing.
 //!
 //! So the tests composite: they carry their own source-over, which is the same
 //! maths the renderer's blend state does, and every contrast assertion is made
-//! against the *worst* of the two extreme backdrops — pure white and pure
-//! black — because the desktop behind the launcher is not under our control and
-//! could be either. That is what sets the panel's alpha: raise it and
-//! translucency is lost, lower it and dim text stops clearing 4.5:1 over a
-//! light wallpaper.
+//! against the fill composited onto the panel.
+//!
+//! This was not always true. The panel used to be a translucent fill over a
+//! captured and blurred desktop, and the checks then had to composite the panel
+//! itself over two extreme backdrops — a white and a black wallpaper — because
+//! the desktop behind the launcher was not under our control. The capture is
+//! gone for now (`docs/ARCHITECTURE.md`); if it comes back, those two backdrops
+//! come back with it.
 
 use gpui::{hsla, px, BoxShadow, Rgba};
 use orca_core::config::ThemePreference;
@@ -60,13 +64,14 @@ const fn rgba_alpha(hex: u32, alpha: f32) -> Rgba {
 
 /// A resolved palette.
 ///
-/// Every field except the text colours is translucent, because all of them are
-/// painted over the desktop rather than over another palette entry. The text
-/// colours are opaque because a translucent glyph over a translucent panel is
-/// two roundings away from invisible.
+/// `background` is opaque: it is the panel, and it is the surface every other
+/// entry is composited onto. The three fills are translucent because they are
+/// painted over the panel rather than replacing it — a selection is a
+/// *lightening* of the panel, not a colour of its own. The text colours are
+/// opaque because a translucent glyph is one more rounding away from invisible.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
-    /// The panel fill, alpha-blended over the desktop.
+    /// The panel fill.
     pub background: Rgba,
     /// The footer pills, a step above `background`.
     pub surface: Rgba,
@@ -87,12 +92,8 @@ pub struct Theme {
 
 impl Theme {
     /// The dark palette.
-    ///
-    /// The panel is nearly opaque on purpose. See the module docs: the alpha is
-    /// the number that keeps `dim` above 4.5:1 when the launcher is over a
-    /// white wallpaper.
     pub const DARK: Theme = Theme {
-        background: rgba_alpha(0x0a0a0d, 0.88),
+        background: rgba(0x0a0a0d),
         surface: rgba_alpha(0xffffff, 0.07),
         border: rgba_alpha(0xffffff, 0.11),
         selection: rgba_alpha(0xffffff, 0.10),
@@ -104,7 +105,7 @@ impl Theme {
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba_alpha(0xf4f4f7, 0.90),
+        background: rgba(0xf4f4f7),
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
@@ -229,29 +230,16 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
-    /// The two backdrops a translucent panel can land on that matter most: a
-    /// pure white wallpaper and a pure black one. Anything between them is less
-    /// hostile to one palette or the other, so the worst case is always one of
-    /// these two.
-    const BACKDROPS: [(&str, Rgba); 2] = [("white", rgba(0xffffff)), ("black", rgba(0x000000))];
-
     /// The lowest contrast `foreground` reaches against the surface it is
     /// actually drawn on.
     ///
-    /// `fill` is composited *on top of* the panel, which is itself composited
-    /// over each extreme backdrop. The panel cannot be skipped: a selection
-    /// highlight does not sit on the desktop, it sits on the panel, and a
-    /// 10%-white highlight over a white wallpaper is only readable because the
-    /// near-black panel is underneath it. Compositing it over the wallpaper
-    /// directly scores it at 1.00:1, which is a true statement about nothing.
-    fn worst_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
-        BACKDROPS
-            .iter()
-            .map(|(_, backdrop)| {
-                let panel = composite_over(theme.background, *backdrop);
-                contrast(foreground, composite_over(fill, panel))
-            })
-            .fold(f32::INFINITY, f32::min)
+    /// `fill` is composited *on top of* the panel. The panel cannot be skipped:
+    /// a selection highlight does not sit on the desktop, it sits on the panel,
+    /// and a 10%-white highlight over a near-black panel is dark enough for white
+    /// text to clear 4.5:1 on. Compositing it against anything else scores a
+    /// number about nothing.
+    fn drawn_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
+        contrast(foreground, composite_over(fill, theme.background))
     }
 
     #[test]
@@ -280,10 +268,8 @@ mod tests {
         // property of a palette that a human should never have to check, and it
         // is the property that regresses silently when someone tunes a hex.
         //
-        // Checked against the composited panel, over both extreme backdrops,
-        // because the panel is translucent and the desktop behind it is not
-        // ours. A palette that only passes over black is not a dark palette,
-        // it is a palette that has not been over a light wallpaper yet.
+        // Checked against the composited fill, which for the panel is itself and
+        // for a selection is that fill over the panel.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             for (role, foreground, fill) in [
                 ("text on panel", theme.text, theme.background),
@@ -292,31 +278,27 @@ mod tests {
                 ("text on selection", theme.on_selection, theme.selection),
                 ("dim on selection", theme.dim, theme.selection),
             ] {
-                let ratio = worst_contrast(theme, foreground, fill);
+                let ratio = drawn_contrast(theme, foreground, fill);
                 assert!(
                     ratio >= 4.5,
-                    "{name}: {role} is only {ratio:.2}:1 over the worst backdrop, \
-                     below the 4.5:1 floor"
+                    "{name}: {role} is only {ratio:.2}:1 on the surface it is drawn \
+                     on, below the 4.5:1 floor"
                 );
             }
         }
     }
 
     #[test]
-    fn the_panel_is_actually_translucent() {
-        // The whole look depends on this. An alpha of 1.0 would still pass the
-        // contrast tests and would look like the launcher did before, so the
-        // property is asserted rather than assumed.
+    fn the_panel_is_opaque() {
+        // The window around the panel is transparent, so an alpha below 1.0 on
+        // the panel fill means the desktop shows through the card itself —
+        // legible text behind the launcher's own text. Asserted because an
+        // alpha here is invisible in every other test: dropping it to 0.9 would
+        // pass all of them.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
-            assert!(
-                theme.background.a < 0.95,
-                "{name}: the panel fill is opaque (alpha {})",
-                theme.background.a
-            );
-            assert!(
-                theme.background.a > 0.5,
-                "{name}: the panel is too transparent to keep text readable \
-                 (alpha {})",
+            assert_eq!(
+                theme.background.a, 1.0,
+                "{name}: the panel fill must be opaque, not alpha {}",
                 theme.background.a
             );
         }
@@ -334,8 +316,8 @@ mod tests {
     #[test]
     fn compositing_a_translucent_colour_moves_it_toward_the_backdrop() {
         // A half-transparent black over white lands halfway to white, and over
-        // black it lands on black. Both directions are the whole reason the
-        // panel's alpha has to be a considered number rather than 1.0.
+        // black it lands on black. Both directions are what a selection fill is:
+        // it is only a lightening or a darkening of the panel it sits on.
         //
         // Asserted on channel values rather than luminance: "halfway" is a
         // statement about the 0.5 *sRGB value*, and the WCAG luminance of a 50%
@@ -356,7 +338,7 @@ mod tests {
             over_black.r
         );
         // Fully transparent on top leaves the backdrop untouched, which is what
-        // makes the shadow margin around the panel see-through.
+        // the unpainted shadow margin around the panel relies on.
         let clear = composite_over(rgba_alpha(0xff0000, 0.0), rgba(0x123456));
         assert_eq!(clear.r, rgba(0x123456).r);
         assert_eq!(clear.a, 1.0, "an opaque backdrop stays opaque");
