@@ -49,7 +49,13 @@ pub struct RawResult {
     /// What the user reads.
     pub title: String,
     /// Optional second line. Blank strings are normalised to `None`.
+    ///
+    /// Display-only, and never a filesystem path. See
+    /// [`crate::ResultItem::keywords`] for searchable text that is not shown.
     pub subtitle: Option<String>,
+    /// Matched against the query, never rendered. See
+    /// [`crate::ResultItem::keywords`].
+    pub keywords: Option<String>,
     /// Which kind of thing this is.
     pub source: Source,
     /// The provider's own prior, in `0.0 ..= 1.0`.
@@ -75,6 +81,7 @@ impl RawResult {
             id: id.into(),
             title: title.into(),
             subtitle: None,
+            keywords: None,
             source,
             score: 0.0,
             target,
@@ -82,6 +89,8 @@ impl RawResult {
     }
 
     /// Builder-style setter for [`RawResult::subtitle`]; blank becomes `None`.
+    ///
+    /// Display-only, and never a path — see [`RawResult::subtitle`].
     #[must_use]
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> RawResult {
         let subtitle = subtitle.into();
@@ -89,6 +98,18 @@ impl RawResult {
             None
         } else {
             Some(subtitle)
+        };
+        self
+    }
+
+    /// Builder-style setter for [`RawResult::keywords`]; blank becomes `None`.
+    #[must_use]
+    pub fn with_keywords(mut self, keywords: impl Into<String>) -> RawResult {
+        let keywords = keywords.into();
+        self.keywords = if keywords.trim().is_empty() {
+            None
+        } else {
+            Some(keywords)
         };
         self
     }
@@ -110,6 +131,7 @@ impl RawResult {
             id: self.id,
             title: self.title,
             subtitle: self.subtitle,
+            keywords: self.keywords,
             source: self.source,
             score: self.score,
             frecency,
@@ -287,11 +309,20 @@ impl ProviderSet {
 }
 
 /// Everything a provider can fail with.
+///
+/// [`ProviderError::Io`] carries a path because the log needs it, and the
+/// status line does not. They are different audiences: `run.log` is where a
+/// person goes to find out which directory failed, and the status line is
+/// inside a 660px panel that is dismissed with <kbd>Esc</kbd>. So the path
+/// lives in the `Display` used by the log, and [`ProviderError::user_message`]
+/// — which the UI reads — leaves it out.
 #[derive(Debug)]
 pub enum ProviderError {
     /// A directory could not be listed.
     Io {
         /// The path that failed.
+        ///
+        /// Never rendered in the UI; see the type docs.
         path: std::path::PathBuf,
         /// The OS error, rendered.
         detail: String,
@@ -333,10 +364,150 @@ impl Error for ProviderError {
     }
 }
 
+impl ProviderError {
+    /// The message for the status line, which is inside the popup and must
+    /// never contain a path.
+    ///
+    /// The OS error alone is usually enough to act on — "access denied" tells a
+    /// person to fix permissions, where "could not list C:\Users\chris\Library"
+    /// tells them a directory they never configured is misbehaving. When it is
+    /// not enough, `run.log` has the path.
+    ///
+    /// This exists because `Display` cannot do both jobs. One string with two
+    /// audiences is how a path ends up somewhere nobody audited.
+    #[must_use]
+    pub fn user_message(&self) -> String {
+        match self {
+            ProviderError::Io { detail, .. } => format!("could not read a folder: {detail}"),
+            ProviderError::Failed { provider, source } => {
+                format!("{provider} is unavailable: {}", source.user_message())
+            }
+            ProviderError::History(_) => "could not read launch history".to_owned(),
+        }
+    }
+}
+
 pub mod commands;
 pub mod env;
 pub mod files;
 
 pub use commands::{Alias, CommandProvider};
-pub use env::{EnvVar, EnvVarProvider};
+pub use env::{looks_like_path, EnvVar, EnvVarProvider};
 pub use files::{DirectoryLister, FileSearchProvider, InMemoryDirectory, WalkLimits};
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::Files;
+
+    /// The rule, stated once: **no provider may put a filesystem path in a field
+    /// the UI renders.**
+    ///
+    /// `subtitle` is rendered and `keywords` is not, so this is the only place
+    /// the distinction can be enforced for every provider at once, including the
+    /// ones written later. It was worth adding because the leak had three
+    /// independent sources — files, installed apps, and path-valued environment
+    /// variables — and each was a deliberate line of code that looked fine in
+    /// isolation. Fixing them one at a time would have left the fourth to
+    /// whoever writes it next.
+    ///
+    /// The ids are checked too, because `file:` and `app:` ids embed the path and
+    /// are used as element keys. They never reach the screen, and a test that
+    /// flagged them would send someone looking for a bug that is not there.
+    #[test]
+    fn no_provider_renders_a_path() {
+        // Rooted at `C:\root` with entries *directly* under it, because the walk starts
+        // by listing the root and `InMemoryDirectory` only knows a directory's
+        // contents through its children.
+        let directory = InMemoryDirectory::new()
+            .with_file(r"C:\root\report.xlsx")
+            .with_file(r"C:\root\Documents\notes.txt")
+            .with_dir(r"C:\root\Archive");
+        let files = Files {
+            enabled: true,
+            roots: vec![PathBuf::from(r"C:\root")],
+            ..Files::default()
+        };
+        let walked = FileSearchProvider::from_config(&directory, &files)
+            .walk()
+            .expect("an in-memory tree walks");
+        // `walk` already yields `ResultItem`s, so there is nothing to convert
+        // here. Asserting that the fixture produced something keeps the test
+        // from passing vacuously if the walk stops finding entries.
+        assert!(!walked.is_empty(), "the fixture walked to nothing");
+        let file = walked;
+
+        let env = EnvVarProvider::new(vec![
+            ("USERPROFILE".to_owned(), r"C:\Users\chris".to_owned()),
+            (
+                "TEMP".to_owned(),
+                r"C:\Users\chris\AppData\Local\Temp".to_owned(),
+            ),
+            ("OS".to_owned(), "Windows_NT".to_owned()),
+        ])
+        .collect()
+        .expect("no I/O")
+        .into_iter()
+        .map(|raw| raw.into_item(crate::frecency::Frecency::NEVER))
+        .collect::<Vec<_>>();
+
+        let commands = CommandProvider::new([])
+            .collect()
+            .expect("no I/O")
+            .into_iter()
+            .map(|raw| raw.into_item(crate::frecency::Frecency::NEVER))
+            .collect::<Vec<_>>();
+
+        let items = file
+            .iter()
+            .chain(&env)
+            .chain(&commands)
+            .map(|item| (format!("{} ({:?})", item.title, item.source), item))
+            .collect::<Vec<_>>();
+
+        assert!(!items.is_empty(), "no providers ran; the test is vacuous");
+
+        for (label, item) in &items {
+            if let Some(subtitle) = &item.subtitle {
+                assert!(
+                    !looks_like_path(subtitle),
+                    "{label}: the subtitle renders a path: {subtitle:?}"
+                );
+            }
+            // The title is the one string a row cannot avoid showing, so it gets
+            // the same rule. A file's title is its name, which is why this passes
+            // — and it would not, if the walk ever fell back to the full path for
+            // an entry with no file name.
+            assert!(
+                !looks_like_path(&item.title),
+                "{label}: the title renders a path: {:?}",
+                item.title
+            );
+        }
+    }
+
+    /// The status line is inside the popup, so it is covered by the same rule as
+    /// a subtitle — and it is the leak most likely to be reintroduced, because
+    /// `Display` is the obvious thing to reach for when an error needs a
+    /// message and it carries the path.
+    #[test]
+    fn a_provider_error_message_never_carries_the_path() {
+        let error = ProviderError::Io {
+            path: PathBuf::from(r"C:\Users\chris\Library"),
+            detail: "access denied".to_owned(),
+        };
+        assert!(
+            error.user_message().contains("access denied"),
+            "the OS error is the actionable part and must survive"
+        );
+        assert!(
+            !looks_like_path(&error.user_message()),
+            "the status line would render a path: {}",
+            error.user_message()
+        );
+        // The log still gets the path, which is the whole point of having two.
+        assert!(error.to_string().contains(r"C:\Users\chris\Library"));
+    }
+}

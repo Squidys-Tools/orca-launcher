@@ -280,12 +280,28 @@ impl ResultProvider for FileSearchProvider<'_> {
                 id: item.id,
                 title: item.title,
                 subtitle: item.subtitle,
+                keywords: item.keywords,
                 source: item.source,
                 score: item.score,
                 target: item.target,
             })
             .collect())
     }
+}
+
+/// The containing folder's *name*, with no separators and no drive.
+///
+/// This is the only part of a path worth putting on screen. It answers the one
+/// question a file name cannot — `notes.txt` in Documents versus `notes.txt` on
+/// the Desktop — and it reads as a word rather than as a location.
+///
+/// `None` when there is no parent name to report: a filesystem root, or a
+/// relative path with no directory component. The row then shows a title and
+/// nothing else, which is correct rather than a gap.
+fn parent_folder_name(path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    let name = parent.file_name()?.to_string_lossy();
+    (!name.is_empty()).then(|| name.into_owned())
 }
 
 /// Turns one walked path into a candidate.
@@ -303,7 +319,15 @@ fn entry_to_item(path: &Path, kind: EntryKind, modified_at: Option<i64>) -> Resu
         EntryKind::Directory => Source::Folder,
         _ => Source::File,
     };
-    let item = ResultItem::new(
+    // The full path is searchable and is never rendered; the subtitle is the
+    // containing folder's *name*, which is the one piece of a path that
+    // disambiguates two files called `notes.txt` without being a path at all.
+    //
+    // See `ResultItem::keywords` for why these are two fields. The short version
+    // is that a row reading `C:\Users\chris\Documents\2026\notes.txt` is
+    // unusable as a list: it is mostly the same text on every line, and the one
+    // word that varies — the file name — is what the title already says.
+    let mut item = ResultItem::new(
         format!("{}:{}", id_prefix(kind), path.to_string_lossy()),
         name,
         source,
@@ -312,7 +336,10 @@ fn entry_to_item(path: &Path, kind: EntryKind, modified_at: Option<i64>) -> Resu
             args: Vec::new(),
         },
     )
-    .with_subtitle(path.to_string_lossy());
+    .with_keywords(path.to_string_lossy());
+    if let Some(folder) = parent_folder_name(path) {
+        item = item.with_subtitle(folder);
+    }
 
     // Modification time becomes a prior in `0.0 ..= 1.0`, with a one-year
     // half-life over the Unix epoch — a coarse, deliberately forgiving scale,
@@ -721,7 +748,10 @@ mod tests {
         assert_eq!(file.id, r"file:C:\root\notes.txt");
         assert_eq!(file.frecency, Frecency::NEVER);
         assert_eq!(file.score, 0.0, "no mtime means no prior");
-        assert_eq!(file.subtitle.as_deref(), Some(r"C:\root\notes.txt"));
+        // The subtitle is the folder name only. The full path is searchable, and
+        // is carried in `keywords` precisely so it never has to be rendered.
+        assert_eq!(file.subtitle.as_deref(), Some("root"));
+        assert_eq!(file.keywords.as_deref(), Some(r"C:\root\notes.txt"));
         assert_eq!(
             file.target,
             LaunchTarget::Executable {

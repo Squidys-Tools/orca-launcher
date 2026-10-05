@@ -78,7 +78,12 @@ pub fn installed_app_to_raw(app: &InstalledApp) -> RawResult {
             args: arguments,
         },
     )
-    .with_subtitle(app.target.to_string_lossy())
+    // No subtitle. An application's name is its whole identity, so a second line
+    // has nothing to add — and what it used to carry was
+    // `C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`, which is
+    // the same on every installed app and long besides. The path stays as
+    // `keywords`, so it is still searchable.
+    .with_keywords(app.target.to_string_lossy())
 }
 
 /// `std::fs` behind `orca-core`'s [`DirectoryLister`].
@@ -159,7 +164,11 @@ mod tests {
                 args: Vec::new(),
             }
         );
-        assert_eq!(raw.subtitle.as_deref(), Some(r"C:\Windows\notepad.exe"));
+        // No subtitle: an app's name says everything, and what used to be on the
+        // second line was the same long path for every installed app. The path
+        // stays searchable in `keywords`.
+        assert_eq!(raw.subtitle, None);
+        assert_eq!(raw.keywords.as_deref(), Some(r"C:\Windows\notepad.exe"));
     }
 
     #[test]

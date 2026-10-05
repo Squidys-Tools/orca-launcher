@@ -84,5 +84,6 @@ pub use matching::{
 };
 pub use model::{LaunchTarget, ResultItem, Source};
 pub use policy::{RankingPolicy, WeightTable};
+pub use providers::looks_like_path;
 pub use providers::{ProviderError, RawResult, ResultProvider};
 pub use rank::{rank, rank_at, rank_with, RankedItem};
