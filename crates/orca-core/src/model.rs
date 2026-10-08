@@ -144,9 +144,23 @@ pub struct ResultItem {
     /// Primary label shown in the result row, and the text the query is
     /// matched against.
     pub title: String,
-    /// Secondary label: a path, a hostname, a description. `None` renders as
-    /// no second line rather than an empty one. Also matched, at a discount.
+    /// Secondary label: a hostname, a folder name, a description. `None` renders
+    /// as no second line rather than an empty one. Also matched, at a discount.
+    ///
+    /// **This is what the user reads, so it must never be a filesystem path.**
+    /// See [`ResultItem::keywords`] for the text that is searchable precisely
+    /// because it is never displayed, and [`crate::looks_like_path`] for the
+    /// rule this field is held to.
     pub subtitle: Option<String>,
+    /// Extra text the query is matched against and that is **never rendered**.
+    ///
+    /// This exists because [`ResultItem::subtitle`] cannot be both the thing on
+    /// screen and the thing we search. A file's full path is worth matching —
+    /// typing `downloads` should find a file in Downloads — and is not worth
+    /// reading, because a row of `C:\Users\chris\Downloads\2024\report-final.docx`
+    /// is noise on every single result. Splitting the two roles means neither
+    /// has to compromise.
+    pub keywords: Option<String>,
     /// Which kind of thing this is.
     pub source: Source,
     /// Provider-supplied prior relevance in `0.0 ..= 1.0`.
@@ -170,6 +184,7 @@ impl ResultItem {
             id: id.into(),
             title: title.into(),
             subtitle: None,
+            keywords: None,
             source,
             score: 0.0,
             frecency: Frecency::NEVER,
@@ -180,6 +195,13 @@ impl ResultItem {
     /// Builder-style setter for [`ResultItem::subtitle`].
     ///
     /// An empty or whitespace-only string becomes `None`.
+    ///
+    /// The value is stored as given rather than filtered. Refusing a
+    /// path-shaped string here would make the rule true by construction, but it
+    /// would also silently discard it, and a caller who cannot tell the
+    /// difference between "rejected" and "stored" will eventually depend on the
+    /// wrong one. The rule is held by `no_provider_renders_a_path` instead,
+    /// which fails loudly and points here.
     #[must_use]
     pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> ResultItem {
         let subtitle = subtitle.into();
@@ -187,6 +209,20 @@ impl ResultItem {
             None
         } else {
             Some(subtitle)
+        };
+        self
+    }
+
+    /// Builder-style setter for [`ResultItem::keywords`].
+    ///
+    /// Blank strings become `None`, exactly as in [`ResultItem::with_subtitle`].
+    #[must_use]
+    pub fn with_keywords(mut self, keywords: impl Into<String>) -> ResultItem {
+        let keywords = keywords.into();
+        self.keywords = if keywords.trim().is_empty() {
+            None
+        } else {
+            Some(keywords)
         };
         self
     }

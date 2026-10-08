@@ -112,6 +112,7 @@ fn to_raw(item: ResultItem) -> RawResult {
         id: item.id,
         title: item.title,
         subtitle: item.subtitle,
+        keywords: item.keywords,
         source: item.source,
         score: item.score,
         target: item.target,
@@ -292,7 +293,10 @@ impl Engine {
         let collected = self
             .catalog
             .collect(self.lister.as_ref(), history.as_ref())
-            .map_err(|error| error.to_string())?;
+            // `user_message`, not `to_string`: this string becomes the status
+            // line inside the popup, and no path is ever rendered there. The full
+            // `Display`, path included, is what the log gets.
+            .map_err(|error| error.user_message())?;
         let shared: Shared = Arc::new(collected);
         drop(history);
 

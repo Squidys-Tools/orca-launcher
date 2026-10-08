@@ -1,7 +1,7 @@
-//! The four Win32 calls the composition root needs that `orca-win` does not
+//! The five Win32 calls the composition root needs that `orca-win` does not
 //! expose, and one pure function that decides which monitor a point is on.
 //!
-//! # Why this file exists, and why it is four functions
+//! # Why this file exists, and why it is five functions
 //!
 //! `docs/ARCHITECTURE.md` rule 3 says `orca-win` is the only place Win32 is
 //! called, and this file breaks that rule. It is a deliberate, itemised
@@ -13,8 +13,9 @@
 //! | [`set_shown`] | `Window::hide` / `Window::show` | the persistent-window design; see below |
 //! | [`move_to`] | `Window::set_position` | a retained window must follow the cursor to another monitor |
 //! | [`logical_cursor`] | a cursor-position read | "centre on the cursor's monitor" is the placement rule |
+//! | [`round_corners`] | `DWMWA_WINDOW_CORNER_PREFERENCE` | see "Rounded corners" below |
 //!
-//! The correct home for all four is `orca-win`, which was already merged and is
+//! The correct home for all five is `orca-win`, which was already merged and is
 //! not being edited. When it is next opened, they move there verbatim and this
 //! file disappears. Until then they are here, in one file, with no other
 //! `unsafe` in the crate, so the exception is reviewable in one sitting.
@@ -56,6 +57,54 @@
 //!
 //! The interesting half — which display contains a point — is
 //! [`display_containing`], which is pure and tested.
+//!
+//! # Rounded corners
+//!
+//! The panel's corners are rounded by [`crate::ui`] painting a rounded rect on
+//! a window that is transparent outside it, *not* by this function. That is the
+//! better mechanism, and the reason is worth writing down because DWM's
+//! attribute looks like the obvious answer first:
+//!
+//! * `DWMWA_WINDOW_CORNER_PREFERENCE` is Windows 11 only, offers only a few
+//!   radii (8px, 4px, none), and rounds the *window*. The panel wants about
+//!   20px, and the window is deliberately larger than the panel so the drop
+//!   shadow has somewhere to live — so DWM would round the outside edge of the
+//!   shadow, which is the one edge that has to stay square.
+//! * It only reaches windows DWM redirects, and `gpui_windows` sets
+//!   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
+//!   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set — in
+//!   which case the window is composited by DComp and DWM leaves it alone.
+//!
+//! Painting the radius has neither problem: identical on Windows 10 and 11, any
+//! radius, antialiased. It does require a window that is genuinely transparent
+//! outside the panel, which is one enum value in `WindowOptions` rather than a
+//! call.
+//!
+//! This function therefore *suppresses* the DWM rounding rather than asking for
+//! it, so a Windows 11 build cannot quietly round the window's outer edge and
+//! clip the shadow the panel is floating on.
+//!
+//! # The frame around the window
+//!
+//! `WindowBackgroundAppearance::Transparent` — the value the whole design
+//! depends on — also puts a **one-pixel border around the entire window**.
+//!
+//! That is not a GPUI rendering decision. `gpui_windows` maps the appearance
+//! onto `SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
+//! `Transparent` it sends `accent_state = 2`
+//! (`ACCENT_ENABLE_TRANSPARENTGRADIENT`) with `accent_flags = 2`
+//! (`WCA_ACCENT_FLAG_DRAW_ALLBORDERS`) — read it in
+//! `gpui_windows/src/window.rs`, `set_window_composition_attribute`. `Opaque`
+//! sends `accent_state = 0` instead, which is why the border is new rather than
+//! pre-existing. Choosing transparency is precisely what asks Windows for it.
+//!
+//! The two things are independent, and that is what makes this fixable: the
+//! per-pixel alpha comes from the Direct Composition swap chain being cleared
+//! to `[0, 0, 0, 0]`, not from the accent policy. So turning the policy back off
+//! removes the frame and leaves the shadow margin transparent.
+//!
+//! Hence [`clear_window_frame`]. It is `Opaque`'s `accent_state` of `0` —
+//! `WCA_ACCENT_ENABLE_NONE` — applied after GPUI has set the appearance.
 
 use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
@@ -63,7 +112,12 @@ use orca_core::LaunchTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE, DWM_WINDOW_CORNER_PREFERENCE,
+};
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -178,6 +232,159 @@ pub fn activate(hwnd: HWND) -> bool {
     orca_win::is_foreground(handle)
 }
 
+/// Stops DWM from rounding the window's own corners.
+///
+/// The panel rounds itself; see the module docs for why. This exists so that
+/// the one edge which must stay square — the outside of the drop shadow — stays
+/// square on Windows 11, where DWM rounds frameless top-level windows by
+/// default.
+///
+/// Reports whether Windows accepted the request. `false` is not a failure to
+/// act on: the attribute is Windows 11 build 22000 and later, and on anything
+/// older there is nothing to suppress, so the correct behaviour is to carry on.
+/// It is returned so the caller can put the one number in the log that says
+/// which path the corners are actually taking.
+pub fn round_corners(hwnd: HWND) -> bool {
+    let preference = DWM_WINDOW_CORNER_PREFERENCE(DWMWCP_DONOTROUND.0);
+    // SAFETY: `hwnd` is a live window handle this process owns. The attribute
+    // takes a pointer to exactly `size_of::<DWM_WINDOW_CORNER_PREFERENCE>()`
+    // bytes of live, correctly aligned, initialised local storage, which is
+    // what is passed. The call only sets a rendering hint and has no effect on
+    // window state if it fails.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&preference as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+    }
+    .is_ok()
+}
+
+/// Removes every piece of window decoration DWM puts on a frameless window.
+///
+/// # Two attempts, because the first one was wrong
+///
+/// The first attempt was the accent policy, on the reasoning that
+/// `WindowBackgroundAppearance::Transparent` sends
+/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). **That call returned
+/// success and the frame survived** — `clear_window_frame=true`,
+/// `window frame cleared=true`, no change on screen. So the accent policy was
+/// never what was drawing it, and a log line reporting that the call succeeded
+/// proved nothing whatsoever. Do not trust "the call worked" for a cosmetic
+/// fix; read the value back.
+///
+/// What is left is DWM's own decoration, which Windows draws around *any*
+/// top-level window regardless of its style bits, and which has to be turned
+/// off through the DWM attributes rather than through compositor state:
+///
+/// * `DWMWA_BORDER_COLOR` → `DWMWA_COLOR_NONE`. The 1px outline. It is a
+///   *colour*, not a flag, and the sentinel that removes it is `0xFFFFFFFE` —
+///   passing black would just draw a black border.
+/// * `DWMWA_NCRENDERING_POLICY` → `DWMNCRP_DISABLED`. DWM's automatic drop
+///   shadow. We draw our own, on the panel; DWM's is around the *window*,
+///   which is the larger rectangle, so it sits outside ours rather than behind
+///   it.
+///
+/// Both are then read back with `DwmGetWindowAttribute` and reported. If the
+/// read-back says the border colour is `none` and a frame is *still* visible,
+/// the frame is not DWM's, and the next place to look is our own painting —
+/// specifically whether the panel's fill is escaping its rounded clip.
+pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
+    // SAFETY: `hwnd` is a live window this process owns. Each call passes a
+    // pointer to exactly as many bytes of live, initialised local storage as it
+    // claims, and both attributes only affect rendering.
+    let border_cleared = unsafe {
+        let none = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&none as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+    .is_ok();
+    let shadow_cleared = unsafe {
+        let policy = DWMNCRP_DISABLED;
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            (&policy as *const DWMNCRENDERINGPOLICY).cast(),
+            std::mem::size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        )
+    }
+    .is_ok();
+
+    WindowDecoration {
+        border_cleared,
+        shadow_cleared,
+        border_now: read_dwm_u32(hwnd, DWMWA_BORDER_COLOR),
+        corners_now: read_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE).map(|value| value as i32),
+    }
+}
+
+/// Reads a `u32`-sized DWM attribute back, for logging.
+fn read_dwm_u32(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<u32> {
+    let mut value = DWMWA_COLOR_NONE;
+    // SAFETY: `value` is a live, writable `u32` and the requested size matches
+    // it exactly.
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            attribute,
+            (&mut value as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    }
+    .is_ok();
+    ok.then_some(value)
+}
+
+/// What `clear_window_frame` was able to do, and what DWM reports afterwards.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowDecoration {
+    /// `DWMWA_BORDER_COLOR` was accepted.
+    pub border_cleared: bool,
+    /// `DWMWA_NCRENDERING_POLICY` was accepted.
+    pub shadow_cleared: bool,
+    /// The border colour DWM reports, or `None` if it would not say.
+    ///
+    /// `Some(0xfffffffe)` is the state we asked for. Anything else means DWM
+    /// ignored us and the frame is real.
+    pub border_now: Option<u32>,
+    /// The corner preference DWM reports. `DWMWCP_DONOTROUND` is `1`.
+    pub corners_now: Option<i32>,
+}
+
+impl WindowDecoration {
+    /// A single log line naming the measured state, not the intent.
+    ///
+    /// Written so it can be read without a lookup table: the two numbers that
+    /// matter are whether the border is now `none` and whether DWM is still
+    /// rounding corners we did not ask it to round.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let border = match self.border_now {
+            Some(colour) if colour == DWMWA_COLOR_NONE => "none".to_owned(),
+            Some(colour) => format!("{colour:#010x} (DWM ignored us)"),
+            None => "unreadable".to_owned(),
+        };
+        let corners = match self.corners_now {
+            Some(0) => "default",
+            Some(1) => "dont-round",
+            Some(2) => "round",
+            Some(3) => "round-small",
+            Some(_) => "unknown",
+            None => "unreadable",
+        };
+        format!(
+            "border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
+            self.border_cleared, self.shadow_cleared,
+        )
+    }
+}
+
 /// Whether a window is currently visible, ignoring whether it is in front.
 ///
 /// `IsWindowVisible` walks the whole parent chain and reports the *effective*
@@ -256,6 +463,16 @@ pub fn move_to(hwnd: HWND, x: f32, y: f32) {
 /// monitor's bounds, and against any other it will not match.
 #[must_use]
 pub fn logical_cursor() -> Option<(f32, f32)> {
+    let (point, _, scale_x, scale_y) = cursor_geometry()?;
+    Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
+}
+
+/// The cursor, and the effective DPI of its monitor, in one trip to Win32.
+///
+/// One call because the cursor position and the scale that interprets it have to
+/// come from the same moment: two independent reads can land on different
+/// monitors when the pointer crosses a seam between them.
+fn cursor_geometry() -> Option<(POINT, HMONITOR, f32, f32)> {
     // SAFETY: `GetCursorPos` takes an out-pointer and has no preconditions.
     let mut point = POINT { x: 0, y: 0 };
     // SAFETY: `point` is a live, writable `POINT`.
@@ -275,7 +492,7 @@ pub fn logical_cursor() -> Option<(f32, f32)> {
     if scale_x <= 0.0 || scale_y <= 0.0 {
         return None;
     }
-    Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
+    Some((point, monitor, scale_x, scale_y))
 }
 
 /// The display the cursor is on.

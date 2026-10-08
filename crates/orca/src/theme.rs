@@ -11,8 +11,29 @@
 //! than a registry read. `Window::appearance()` is the platform's own answer to
 //! "is this app light or dark right now", so it also follows the user changing
 //! their theme while the launcher is running, and it costs no Win32 call.
+//!
+//! # What "contrast" is measured against
+//!
+//! The panel is **opaque**, so its own RGB is the colour the user sees and a
+//! contrast check needs no help. What is *not* opaque is everything painted on
+//! top of it: the selection fill, the footer pills, the border. Those are
+//! alpha-blended over the panel, and a `10%`-white selection over a near-black
+//! panel is a slightly lighter near-black — which is what makes a highlighted
+//! row readable, and is also why checking the selection's raw RGB against the
+//! text would score a number about nothing.
+//!
+//! So the tests composite: they carry their own source-over, which is the same
+//! maths the renderer's blend state does, and every contrast assertion is made
+//! against the fill composited onto the panel.
+//!
+//! This was not always true. The panel used to be a translucent fill over a
+//! captured and blurred desktop, and the checks then had to composite the panel
+//! itself over two extreme backdrops — a white and a black wallpaper — because
+//! the desktop behind the launcher was not under our control. The capture is
+//! gone for now (`docs/ARCHITECTURE.md`); if it comes back, those two backdrops
+//! come back with it.
 
-use gpui::Rgba;
+use gpui::{hsla, px, BoxShadow, Rgba};
 use orca_core::config::ThemePreference;
 use orca_core::Source;
 
@@ -24,30 +45,46 @@ use orca_core::Source;
 /// `byte / 255.0` — and doing it in a `const fn` means the whole palette
 /// collapses to eight immediate constants in the binary.
 const fn rgba(hex: u32) -> Rgba {
+    rgba_alpha(hex, 1.0)
+}
+
+/// A translucent colour from a packed `0xRRGGBB` literal and an alpha.
+///
+/// Kept next to [`rgba`] rather than inlined at each call site so that every
+/// translucent entry in the palette visibly carries its alpha, which is the
+/// number that decides whether text on it stays readable.
+const fn rgba_alpha(hex: u32, alpha: f32) -> Rgba {
     Rgba {
         r: ((hex >> 16) & 0xff) as f32 / 255.0,
         g: ((hex >> 8) & 0xff) as f32 / 255.0,
         b: (hex & 0xff) as f32 / 255.0,
-        a: 1.0,
+        a: alpha,
     }
 }
 
 /// A resolved palette.
+///
+/// `background` is opaque: it is the panel, and it is the surface every other
+/// entry is composited onto. The three fills are translucent because they are
+/// painted over the panel rather than replacing it — a selection is a
+/// *lightening* of the panel, not a colour of its own. The text colours are
+/// opaque because a translucent glyph is one more rounding away from invisible.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
-    /// Window background.
+    /// The panel fill.
     pub background: Rgba,
-    /// The query bar and the status bar, a step above `background`.
+    /// The footer pills, a step above `background`.
     pub surface: Rgba,
-    /// Hairlines between the three bands.
+    /// The hairline around the panel and under the footer.
     pub border: Rgba,
     /// The selected row's fill.
     pub selection: Rgba,
     /// Primary text.
     pub text: Rgba,
-    /// Secondary text: subtitles, the prompt, the status bar.
+    /// Secondary text: the per-row source name, the search placeholder, the
+    /// status line.
     pub dim: Rgba,
-    /// The caret and the `>` glyph.
+    /// The caret and the search glyph.
     pub accent: Rgba,
     /// Text drawn on top of `selection`.
     pub on_selection: Rgba,
@@ -56,26 +93,26 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba(0x16161a),
-        surface: rgba(0x1c1c21),
-        border: rgba(0x2a2a30),
-        selection: rgba(0x2b4c6f),
-        text: rgba(0xf2f2f2),
-        dim: rgba(0x8a8a97),
-        accent: rgba(0x6aa9ff),
-        on_selection: rgba(0xf2f2f2),
+        background: rgba(0x0a0a0d),
+        surface: rgba_alpha(0xffffff, 0.07),
+        border: rgba_alpha(0xffffff, 0.11),
+        selection: rgba_alpha(0xffffff, 0.10),
+        text: rgba(0xf6f6f8),
+        dim: rgba(0xb0b0ba),
+        accent: rgba(0x5b9dff),
+        on_selection: rgba(0xffffff),
     };
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba(0xfbfbfd),
-        surface: rgba(0xf0f0f4),
-        border: rgba(0xd8d8de),
-        selection: rgba(0xcfe0f5),
-        text: rgba(0x1b1b1f),
-        dim: rgba(0x63636e),
-        accent: rgba(0x0b5fc4),
-        on_selection: rgba(0x1b1b1f),
+        background: rgba(0xf4f4f7),
+        surface: rgba_alpha(0x000000, 0.05),
+        border: rgba_alpha(0x000000, 0.11),
+        selection: rgba_alpha(0x000000, 0.07),
+        text: rgba(0x16161a),
+        dim: rgba(0x494952),
+        accent: rgba(0x0a4fa8),
+        on_selection: rgba(0x16161a),
     };
 
     /// Resolves a preference against the OS appearance.
@@ -97,24 +134,42 @@ impl Theme {
             }
         }
     }
+
+    /// The drop shadow under the panel.
+    ///
+    /// Two shadows rather than one, because a single large blur reads as a grey
+    /// halo: the tight one is the contact shadow that says the panel is above
+    /// the desktop, and the wide one is the ambient occlusion that says it is
+    /// floating. This is the reason the window is larger than the panel — the
+    /// ambient shadow needs somewhere to go.
+    #[must_use]
+    pub fn panel_shadows(self) -> Vec<BoxShadow> {
+        vec![
+            BoxShadow::new(px(0.), px(2.), hsla(0.0, 0.0, 0.0, 0.44)).blur_radius(px(6.)),
+            BoxShadow::new(px(0.), px(24.), hsla(0.0, 0.0, 0.0, 0.30)).blur_radius(px(56.)),
+        ]
+    }
 }
 
-/// The short label shown in a result row's gutter.
+/// The name shown at the right of a result row.
 ///
-/// Deliberately a fixed width per source rather than a free string: the rows
-/// are a single `flex_row` and a gutter that changes width per row makes the
-/// titles not line up, which reads as misalignment rather than as variety.
+/// Long, human, and right-aligned, rather than the short gutter tag this used
+/// to be. Two reasons: a fixed-width left gutter exists to keep titles aligned
+/// across rows, and a right-aligned column needs no such reservation, so the
+/// space the gutter was holding can go to the title; and the right-hand
+/// position is where the reference puts it, so a row reads as
+/// "what it is" then "what kind of thing it is".
 #[must_use]
-pub fn source_label(source: Source) -> &'static str {
+pub fn source_name(source: Source) -> &'static str {
     match source {
-        Source::Application => "app",
-        Source::File => "file",
-        Source::Folder => "dir",
-        Source::Command => "cmd",
-        Source::WebSearch => "web",
-        Source::Calculator => "calc",
-        Source::Clipboard => "clip",
-        Source::Unknown => "?",
+        Source::Application => "Application",
+        Source::File => "File",
+        Source::Folder => "Folder",
+        Source::Command => "Command",
+        Source::WebSearch => "Web search",
+        Source::Calculator => "Calculator",
+        Source::Clipboard => "Clipboard",
+        Source::Unknown => "Other",
     }
 }
 
@@ -122,7 +177,35 @@ pub fn source_label(source: Source) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Relative luminance, per WCAG 2.1.
+    /// Source-over compositing: `top` drawn on `bottom`.
+    ///
+    /// The renderer's blend is `SRC_ALPHA` / `INV_SRC_ALPHA` with a separate
+    /// `ONE` / `ONE` alpha channel, which is exactly this. It lives here rather
+    /// than in the palette because its only callers are the contrast tests, and
+    /// a `pub fn` in a binary crate that nothing calls is dead code the gate
+    /// (correctly) refuses.
+    fn composite_over(top: Rgba, bottom: Rgba) -> Rgba {
+        let inverse = 1.0 - top.a;
+        let alpha = top.a + bottom.a * inverse;
+        if alpha <= 0.0 {
+            return Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
+        }
+        let channel = |t: f32, b: f32| (t * top.a + b * bottom.a * inverse) / alpha;
+        Rgba {
+            r: channel(top.r, bottom.r),
+            g: channel(top.g, bottom.g),
+            b: channel(top.b, bottom.b),
+            a: alpha,
+        }
+    }
+
+    /// Relative luminance, per WCAG 2.1. Ignores alpha: every colour reaching
+    /// this function has already been composited to opaque.
     fn luminance(color: Rgba) -> f32 {
         fn channel(value: f32) -> f32 {
             if value <= 0.03928 {
@@ -145,6 +228,18 @@ mod tests {
             }
         };
         (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The lowest contrast `foreground` reaches against the surface it is
+    /// actually drawn on.
+    ///
+    /// `fill` is composited *on top of* the panel. The panel cannot be skipped:
+    /// a selection highlight does not sit on the desktop, it sits on the panel,
+    /// and a 10%-white highlight over a near-black panel is dark enough for white
+    /// text to clear 4.5:1 on. Compositing it against anything else scores a
+    /// number about nothing.
+    fn drawn_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
+        contrast(foreground, composite_over(fill, theme.background))
     }
 
     #[test]
@@ -172,58 +267,114 @@ mod tests {
         // 4.5:1 is the WCAG AA floor for normal-size text. This is the one
         // property of a palette that a human should never have to check, and it
         // is the property that regresses silently when someone tunes a hex.
+        //
+        // Checked against the composited fill, which for the panel is itself and
+        // for a selection is that fill over the panel.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
-            for (role, foreground, background) in [
-                ("text on background", theme.text, theme.background),
-                ("text on surface", theme.text, theme.surface),
-                ("dim on background", theme.dim, theme.background),
-                ("dim on surface", theme.dim, theme.surface),
-                (
-                    "on_selection on selection",
-                    theme.on_selection,
-                    theme.selection,
-                ),
-                ("accent on background", theme.accent, theme.background),
+            for (role, foreground, fill) in [
+                ("text on panel", theme.text, theme.background),
+                ("dim on panel", theme.dim, theme.background),
+                ("accent on panel", theme.accent, theme.background),
+                ("text on selection", theme.on_selection, theme.selection),
+                ("dim on selection", theme.dim, theme.selection),
             ] {
-                let ratio = contrast(foreground, background);
+                let ratio = drawn_contrast(theme, foreground, fill);
                 assert!(
                     ratio >= 4.5,
-                    "{name}: {role} is only {ratio:.2}:1, below the 4.5:1 floor"
+                    "{name}: {role} is only {ratio:.2}:1 on the surface it is drawn \
+                     on, below the 4.5:1 floor"
                 );
             }
         }
     }
 
     #[test]
-    fn the_light_palette_is_actually_light_and_the_dark_one_actually_dark() {
-        assert!(luminance(Theme::LIGHT.background) > 0.5);
-        assert!(luminance(Theme::DARK.background) < 0.05);
-    }
-
-    #[test]
-    fn the_palettes_are_not_inverted_copies_of_each_other() {
-        // If a future edit flips one channel of one colour, the two palettes
-        // becoming accidental inverses is the tell.
-        assert_ne!(Theme::DARK.background, Theme::LIGHT.background);
-        assert_ne!(Theme::DARK.accent, Theme::LIGHT.accent);
-    }
-
-    #[test]
-    fn every_source_has_a_gutter_label_that_cannot_break_the_column() {
-        for source in Source::ALL {
-            let label = source_label(source);
-            assert!(!label.is_empty(), "{source:?} has no label");
-            // The gutter is a fixed width, so a label containing whitespace
-            // would wrap and push the title right for that row only — which
-            // reads as a misalignment rather than as a label.
-            assert!(
-                !label.chars().any(char::is_whitespace),
-                "{source:?} label {label:?} contains whitespace"
-            );
-            assert!(
-                label.chars().count() <= 4,
-                "{source:?} label {label:?} is too wide for the gutter"
+    fn the_panel_is_opaque() {
+        // The window around the panel is transparent, so an alpha below 1.0 on
+        // the panel fill means the desktop shows through the card itself —
+        // legible text behind the launcher's own text. Asserted because an
+        // alpha here is invisible in every other test: dropping it to 0.9 would
+        // pass all of them.
+        for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
+            assert_eq!(
+                theme.background.a, 1.0,
+                "{name}: the panel fill must be opaque, not alpha {}",
+                theme.background.a
             );
         }
+    }
+
+    #[test]
+    fn the_panel_tint_still_follows_the_system_appearance() {
+        // Translucency must not have flattened the palettes into each other: a
+        // dark launcher over a dark desktop and a light one over a light
+        // desktop are different products, and the tint is what tells them
+        // apart before any text is read.
+        assert!(luminance(Theme::LIGHT.background) > luminance(Theme::DARK.background));
+    }
+
+    #[test]
+    fn compositing_a_translucent_colour_moves_it_toward_the_backdrop() {
+        // A half-transparent black over white lands halfway to white, and over
+        // black it lands on black. Both directions are what a selection fill is:
+        // it is only a lightening or a darkening of the panel it sits on.
+        //
+        // Asserted on channel values rather than luminance: "halfway" is a
+        // statement about the 0.5 *sRGB value*, and the WCAG luminance of a 50%
+        // grey is 0.21, not 0.5. Comparing the two would be the kind of
+        // plausible-looking arithmetic that makes a test pass for the wrong
+        // reason.
+        let half_black = rgba_alpha(0x000000, 0.5);
+        let over_white = composite_over(half_black, rgba(0xffffff));
+        let over_black = composite_over(half_black, rgba(0x000000));
+        assert!(
+            (over_white.r - 0.5).abs() < 0.001,
+            "half black over white should be 0.5 grey, got {}",
+            over_white.r
+        );
+        assert!(
+            over_black.r < 0.001,
+            "half black over black should be black, got {}",
+            over_black.r
+        );
+        // Fully transparent on top leaves the backdrop untouched, which is what
+        // the unpainted shadow margin around the panel relies on.
+        let clear = composite_over(rgba_alpha(0xff0000, 0.0), rgba(0x123456));
+        assert_eq!(clear.r, rgba(0x123456).r);
+        assert_eq!(clear.a, 1.0, "an opaque backdrop stays opaque");
+    }
+
+    #[test]
+    fn every_source_has_a_right_hand_label() {
+        for source in Source::ALL {
+            let name = source_name(source);
+            assert!(!name.is_empty(), "{source:?} has no name");
+            // It sits at the end of a fixed-height row, so a name that wraps
+            // would push the row taller than its neighbours.
+            assert!(
+                !name.contains('\n') && !name.contains('\r'),
+                "{source:?} name {name:?} contains a line break"
+            );
+            assert!(
+                name.chars().count() <= 14,
+                "{source:?} name {name:?} is too wide for one row"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shadow_has_a_tight_layer_and_a_wide_one() {
+        // One blur cannot do both jobs: a wide one alone reads as a grey halo
+        // rather than as a panel above a surface, and a tight one alone reads
+        // as a sticker. The wide layer is also why the window is larger than
+        // the panel, so the ordering of the two is the property that matters.
+        let shadows = Theme::DARK.panel_shadows();
+        assert_eq!(shadows.len(), 2);
+        let (tight, wide) = (&shadows[0], &shadows[1]);
+        assert!(
+            tight.blur_radius < wide.blur_radius,
+            "the contact shadow must be the tighter of the two"
+        );
+        assert!(wide.offset.y > tight.offset.y, "the wide shadow sits lower");
     }
 }

@@ -15,8 +15,22 @@ path = "src/main.rs"
 # UI thread as values, because both arrive on threads of their own and neither
 # may touch GPUI state. `raw-window-handle` is the trait `gpui::Window`
 # implements to yield its `HWND`, which is what makes the retained popup in
-# `src/win.rs` possible. `windows` is the four calls that close the gap
-# `orca-win` leaves; see the module docs there before adding a fifth.
+# `src/win.rs` possible. `windows` is the five calls that close the gap
+# `orca-win` leaves; see the module docs there before adding a sixth.
+#
+# `Win32_Graphics_Dwm` is the only namespace added for the popup's appearance:
+# `DwmSetWindowAttribute` is the sole reason it is here. The feature list is
+# not free — each namespace is a link-time import the GNU linker resolves — so
+# it names the one call and nothing wider.
+#
+# `Win32_Graphics_Gdi` is here for exactly one call, `MonitorFromPoint`, which is
+# how the popup finds the monitor under the cursor. It used to be inherited from
+# `orca-win`'s feature list, which meant this crate compiled only because it
+# happened to be built in the same graph as a crate that enabled it — so when
+# `orca-win` dropped the feature, the workspace build stayed green while
+# `cargo build -p orca` would have broken on its own. `orca-win` keeps the
+# feature too, for `WNDCLASSW` and `HICON`; both crates needing it is fine, and
+# is the only arrangement where neither depends on the other compiling.
 [dependencies]
 async-channel.workspace = true
 gpui.workspace = true
@@ -24,4 +38,4 @@ gpui_platform.workspace = true
 orca-core = { path = "../orca-core" }
 orca-win = { path = "../orca-win" }
 raw-window-handle = "0.6.2"
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }

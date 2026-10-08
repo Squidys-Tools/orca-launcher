@@ -1,0 +1,16 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "name": "Run the launcher",
+      "command": "./tools/run.ps1",
+      "icon": "play"
+    },
+    {
+      "name": "Run the release build",
+      "command": "./tools/run.ps1 -Release",
+      "icon": "build"
+    }
+  ]
+}

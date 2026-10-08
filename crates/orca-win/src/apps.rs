@@ -456,14 +456,62 @@ fn has_lnk_extension(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
 }
 
-/// The display name for a shortcut: its file name without the extension.
+/// The display name for a shortcut: its file name, minus the parts of it that
+/// are not the program's name.
 ///
 /// Taken from the file name rather than `IShellLink::GetDescription`, because
 /// the description is a free-text field installers leave empty or set to
 /// something the user never sees, and an entry with no name is unsearchable.
 pub fn shortcut_name(shortcut: &Path) -> Option<String> {
     let stem = shortcut.file_stem()?;
-    string_from_wide(&crate::wide::wide_nul(&stem.to_string_lossy()))
+    let raw = stem.to_string_lossy().into_owned();
+    let cleaned = display_name_from(&raw);
+    // A name is not optional in practice — an entry with no title is a row of
+    // nothing — so a stem that is *entirely* noise still yields the raw stem
+    // rather than `None`.
+    Some(if cleaned.is_empty() { raw } else { cleaned })
+}
+
+/// Strips the two pieces of shortcut naming that are not part of a program's
+/// name, and nothing else.
+///
+/// Both were found in a real Start Menu folder: a shortcut to
+/// `windhawk.exe` sitting in `Startup` was named `windhawk.exe - Shortcut.lnk`,
+/// so the launcher offered `windhawk.exe - Shortcut` as the name of a program
+/// called Windhawk. That string is the row's title, which makes it the first
+/// thing a person reads, and it is not a name anyone would type.
+///
+/// * ` - Shortcut`, which Windows appends on "Create shortcut". A program
+///   genuinely called `Foo - Shortcut` loses four characters; the alternative is
+///   every shortcut-based entry reading like a file operation.
+/// * A trailing `.exe`, for the same reason [`app_path_entry_to_app`] drops it:
+///   the extension is already on the target path, and repeating it in the title
+///   is noise.
+///
+/// No other rewriting. Trimming, casing, and inner punctuation are left alone,
+/// because a launcher that second-guesses a program's name is worse than one
+/// that shows a slightly untidy one.
+fn display_name_from(stem: &str) -> String {
+    let trimmed = stem.trim();
+    let base = strip_ignore_ascii_case(trimmed, " - shortcut")
+        .unwrap_or(trimmed)
+        .trim_end();
+    strip_ignore_ascii_case(base, ".exe")
+        .unwrap_or(base)
+        .trim()
+        .to_owned()
+}
+
+/// Removes `suffix` from the end of `text`, ignoring ASCII case.
+///
+/// Byte-indexed on purpose, and safe: an ASCII suffix cannot match bytes inside
+/// a multi-byte UTF-8 sequence, so the split always lands on a character
+/// boundary.
+fn strip_ignore_ascii_case<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
+    let cut = text.len().checked_sub(suffix.len())?;
+    text.get(cut..)
+        .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+        .map(|_| &text[..cut])
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +866,34 @@ mod tests {
             shortcut_name(Path::new(r"C:\Start Menu\Programs\Visual Studio Code.lnk")).as_deref(),
             Some("Visual Studio Code")
         );
+    }
+
+    /// The real case, from a real Start Menu folder: a Startup shortcut to
+    /// `windhawk.exe` named `windhawk.exe - Shortcut.lnk`. The launcher offered
+    /// `windhawk.exe - Shortcut` as the program's name, which is the row's title
+    /// and therefore the first thing a person reads.
+    #[test]
+    fn shortcut_naming_noise_is_stripped_from_the_display_name() {
+        for (path, expected) in [
+            (r"C:\...\Startup\windhawk.exe - Shortcut.lnk", "windhawk"),
+            (r"C:\...\Programs\Foo - shortcut.lnk", "Foo"),
+            (r"C:\...\Programs\Foo - SHORTCUT.lnk", "Foo"),
+            (r"C:\...\Programs\tool.EXE.lnk", "tool"),
+            (r"C:\...\Programs\tool.exe - Shortcut.lnk", "tool"),
+            // Not noise, and must survive untouched: the name is the whole point.
+            (r"C:\...\Programs\Shortcut Manager.lnk", "Shortcut Manager"),
+            (r"C:\...\Programs\My Shortcut Tool.lnk", "My Shortcut Tool"),
+            // All-noise stems still produce a name. An entry with no title is a
+            // row of nothing, which is worse than an untidy one.
+            (r"C:\...\Programs\Shortcut.lnk", "Shortcut"),
+            (r"C:\...\Programs\.exe.lnk", ".exe"),
+        ] {
+            assert_eq!(
+                shortcut_name(Path::new(path)).as_deref(),
+                Some(expected),
+                "{path}"
+            );
+        }
     }
 
     #[test]

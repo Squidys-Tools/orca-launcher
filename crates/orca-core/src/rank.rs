@@ -72,7 +72,18 @@ pub fn rank_with<'a>(
     let mut ranked: Vec<RankedItem> = items
         .into_iter()
         .filter_map(|item| {
-            let quality = policy.match_quality(query, &item.title, item.subtitle.as_deref());
+            // `keywords` is matched alongside the subtitle, and is where a file's full
+            // path lives: searchable without being rendered. Concatenated rather
+            // than scored separately so it lands in the same tiers at the same
+            // discount — a path fragment is a weaker signal than a title, and
+            // there is no reason to invent a fourth weighting for it.
+            let searchable = match (&item.subtitle, &item.keywords) {
+                (Some(subtitle), Some(keywords)) => Some(format!("{subtitle} {keywords}")),
+                (None, Some(keywords)) => Some(keywords.clone()),
+                (Some(subtitle), None) => Some(subtitle.clone()),
+                (None, None) => None,
+            };
+            let quality = policy.match_quality(query, &item.title, searchable.as_deref());
             if quality.kind == MatchKind::None {
                 return None;
             }
@@ -426,14 +437,39 @@ mod tests {
 
     #[test]
     fn subtitles_are_searchable_through_rank() {
-        // `downloads` appears only in the path. Title-only matching scores zero,
-        // which `match_score` proves; `rank` is what makes the file findable.
-        let file = item("file:a", "report").with_subtitle("C:\\Users\\chris\\Downloads");
-        assert_eq!(crate::match_score("downloads", &file.title), 0.0);
+        // `downloads` appears only in the subtitle. Title-only matching scores
+        // zero, which `match_score` proves; `rank` is what makes it findable.
+        let row = item("app:a", "report").with_subtitle("Downloads");
+        assert_eq!(crate::match_score("downloads", &row.title), 0.0);
 
-        let ranked = rank_default("downloads", &[file]);
+        // `Exact`, not `WordBoundary`: the subtitle *is* the query once the path is
+        // gone, where before it was one word inside a longer string. A stronger
+        // tier for the same query is the intended consequence of showing less.
+        let ranked = rank_default("downloads", &[row]);
         assert_eq!(titles(&ranked), vec!["report"]);
-        assert_eq!(ranked[0].quality.kind, MatchKind::WordBoundary);
+        assert_eq!(ranked[0].quality.kind, MatchKind::Exact);
+    }
+
+    #[test]
+    fn keywords_are_searchable_but_never_rendered() {
+        // The property the split exists for: a file's full path stays findable
+        // by a path fragment, and the row still shows only a folder name.
+        //
+        // Both halves are asserted because either alone is a plausible-looking
+        // implementation of half the idea: matching the path without splitting
+        // the field puts the path back on screen, and splitting it without
+        // matching the path silently breaks `type a folder name`.
+        let file = item("file:a", "report")
+            .with_subtitle("Downloads")
+            .with_keywords(r"C:\Users\chris\Downloads\2026\report.xlsx");
+        assert_eq!(crate::match_score("chris", &file.title), 0.0);
+
+        let ranked = rank_default("chris", std::slice::from_ref(&file));
+        assert_eq!(titles(&ranked), vec!["report"]);
+        assert_eq!(file.subtitle.as_deref(), Some("Downloads"));
+        assert!(!crate::providers::env::looks_like_path(
+            file.subtitle.as_deref().unwrap_or_default()
+        ));
     }
 
     #[test]

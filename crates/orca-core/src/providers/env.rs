@@ -41,6 +41,26 @@ use super::{ProviderError, RawResult, ResultProvider};
 /// Longest value rendered into a candidate's subtitle before truncation.
 pub const MAX_VALUE_LEN: usize = 200;
 
+/// Whether a string would read as a filesystem path on screen.
+///
+/// Windows-shaped on purpose, because this is a Windows-only app: a drive
+/// letter, a UNC prefix, or any backslash. A forward slash does **not** count,
+/// so a URL — which is full of them — is not mistaken for a path.
+///
+/// This exists because `subtitle` is rendered and `keywords` is not, and putting
+/// a path in the wrong one is the mistake worth making impossible to repeat.
+/// `no_provider_renders_a_path` holds every provider to it.
+///
+/// No separator and no drive letter means there is nothing here to click, copy,
+/// or mistype into a file manager, so it is not a path for this purpose however
+/// much it happens to look like one.
+#[must_use]
+pub fn looks_like_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    text.starts_with(r"\\") || has_drive || text.contains('\\')
+}
+
 /// One environment variable, as offered to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvVar {
@@ -196,8 +216,22 @@ impl ResultProvider for EnvVarProvider {
                         program: variable.name.clone(),
                         args: Vec::new(),
                     },
-                )
-                .with_subtitle(variable.value.clone());
+                );
+                // An environment variable's value is its content — `EDITOR` and
+                // `NODE_OPTIONS` are useless without it — so it is the subtitle
+                // whenever it is safe to read.
+                //
+                // It is frequently *not* safe: `USERPROFILE`, `TEMP`, and
+                // `COMSPEC` are all paths, and half of `PATH` is a wall of them.
+                // A path-valued variable keeps its value as `keywords`, so
+                // searching still works, and renders no second line at all. An
+                // empty row is the honest answer; a row of `C:\Users\chris` is
+                // the noise the rule exists to prevent.
+                if looks_like_path(&variable.value) {
+                    result = result.with_keywords(variable.value.clone());
+                } else {
+                    result = result.with_subtitle(variable.value.clone());
+                }
                 // A non-runnable variable still shows up, and the subtitle says
                 // so, because a launcher that hides a variable the user can see
                 // in `set` is just lying about its own index.
@@ -262,6 +296,61 @@ mod tests {
         // Searchable, with a zero prior so it does not outrank a real alias.
         assert_eq!(awkward.subtitle.as_deref(), Some("a=b"));
         assert_eq!(awkward.score, 0.0);
+    }
+
+    #[test]
+    fn a_path_valued_variable_is_searchable_but_renders_nothing() {
+        // `USERPROFILE` and `TEMP` are the variables people most often look up,
+        // so dropping them would be worse than useless — and a row reading
+        // `C:\Users\chris` is exactly what the no-paths rule is about.
+        //
+        // Both halves asserted: the value moves to `keywords` rather than being
+        // discarded, and it does not stay in `subtitle`.
+        let provider = EnvVarProvider::new(vec![
+            ("USERPROFILE".to_owned(), r"C:\Users\chris".to_owned()),
+            ("EDITOR".to_owned(), "code --wait".to_owned()),
+        ]);
+        let results = provider.collect().expect("no I/O");
+
+        let profile = results
+            .iter()
+            .find(|r| r.title == "USERPROFILE")
+            .expect("still served");
+        assert_eq!(profile.subtitle, None, "a path must never be rendered");
+        assert_eq!(profile.keywords.as_deref(), Some(r"C:\Users\chris"));
+
+        // A non-path value is still the content of the row, and still shown.
+        let editor = results
+            .iter()
+            .find(|r| r.title == "EDITOR")
+            .expect("still served");
+        assert_eq!(editor.subtitle.as_deref(), Some("code --wait"));
+    }
+
+    #[test]
+    fn looks_like_path_is_windows_shaped_and_spares_urls() {
+        // The predicate decides what gets hidden, so it is worth pinning on both
+        // sides. A false positive costs a row its value; a false negative puts a
+        // path back on screen.
+        for path in [
+            r"C:\Users\chris\notes.txt",
+            r"\\server\share\file",
+            r"relative\to\thing",
+            "C:file.txt",
+        ] {
+            assert!(looks_like_path(path), "{path:?} is a path");
+        }
+        // A URL is full of forward slashes and is not a path. Mistaking one for
+        // a path would blank the subtitle of every web-search result.
+        for text in [
+            "https://example.com/search?q=rust",
+            "code --wait",
+            "Windows_NT",
+            "a=b",
+            "plain text",
+        ] {
+            assert!(!looks_like_path(text), "{text:?} is not a path");
+        }
     }
 
     #[test]

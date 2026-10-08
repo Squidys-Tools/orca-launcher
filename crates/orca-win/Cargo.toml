@@ -15,5 +15,12 @@ publish.workspace = true
 # drift onto two copies of it. The feature list is the exact set of Win32
 # namespaces this crate calls; widening it is not free, because every added
 # namespace is a link-time import the GNU linker has to resolve.
+#
+# `Win32_Graphics_Gdi` is here for the tray's *window class*, not for pixel
+# capture: `WNDCLASSW`, `RegisterClassW`, and `HICON` are all gated behind it.
+# Dropping it looks safe in a workspace build, because `orca` enables the same
+# feature for `MonitorFromPoint` and cargo unifies the two — and then
+# `cargo build -p orca-win` on its own stops compiling. A feature another crate
+# in the graph happens to turn on is not a dependency, in either direction.
 [dependencies]
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

@@ -182,6 +182,41 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
+### 1f. The frame, and an opaque panel
+
+The panel is **opaque**. It does not capture the screen behind it, so nothing
+shows through the card — this changed 2026-10-03, when the frosted backdrop and
+the translucency were removed together. Nothing is photographed from the display
+any more either, which is worth knowing if you were avoiding the launcher for that
+reason.
+
+- [ ] Put a window full of text behind the launcher and press the hotkey.
+      **Expected:** not one pixel of it is visible inside the panel. If the
+      desktop shows through, `Theme::DARK.background.a` is no longer 1.0.
+- [ ] Around the panel — roughly 32px on every side — you see the **desktop**, not
+      black. A black square the size of the whole window means the swap chain's
+      alpha is being ignored. This is `WindowOptions::window_background` and it is
+      load-bearing.
+- [ ] **There must be no 1px frame around the panel**, and the corners are rounded
+      with a radius visibly larger than the selected row's. Read the log:
+      ```
+      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
+      ```
+      | What the log says | What it means |
+      |---|---|
+      | `window frame cleared=true` | The frame removal was accepted by Windows. |
+      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. |
+      | `DWM corner rounding suppressed=false` | Expected below Windows 11, a defect on it. |
+- [ ] The drop shadow is soft and **not cut off** at the window edge, and looks
+      like two layers rather than one grey halo. A hard straight edge means
+      `ui::FRAME_MARGIN` is too small for the 56px blur.
+- [ ] The tray shows a real icon, not a blank slot, and right-click → *Quit*
+      exits. Two separate bugs met here: a null `hIcon` gave a blank slot, and a
+      *fatal* icon load meant no tray at all — which on a resident app means no
+      way to quit. If the icon is blank, say so and paste the `tray:` lines.
+- [ ] No line mentioning `backdrop` appears in the log, at startup or on any
+      toggle. One is a leftover call site.
+
 ## 2. Latency, now that the window is retained
 
 The old create-and-destroy design measured 260–820 ms hotkey-to-first-paint,
@@ -192,6 +227,12 @@ and neither can I.
 The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
 (so it measures pixels, not window objects).
+
+> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
+> is gone (section 1f), so `show` no longer does any capture work — not
+> synchronously, not on the background executor. Every `paint N ms` reading taken
+> before that change included 20–50 ms of `BitBlt` plus box blur and is not a
+> baseline for the current build. Re-measure from scratch.
 
 1. Start the launcher, toggle it open ten times, and read the `paint N ms`
    figures off the status line each time.
@@ -400,6 +441,9 @@ construction, and section 1 and section 4 above are where you check them.
 
 So nobody assumes otherwise:
 
+- **The frosted backdrop is deferred, deliberately.** The panel is opaque and
+  nothing is captured from the screen — which also means the launcher no longer
+  photographs part of the display on every hotkey press. See section 1f.
 - **Multi-monitor and DPI are untested at runtime.** The selection logic is
   unit-tested; the DPI conversion is not tested anywhere.
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system

@@ -284,9 +284,10 @@ each item names the gap it fills:
 | `SetWindowPos` | `Window::set_position` does not exist |
 | `GetCursorPos` + `MonitorFromPoint` + `GetDpiForMonitor` | "centre on the cursor's monitor" needs a cursor read |
 | `ShellExecuteW` | neither crate opens a `LaunchTarget` |
+| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would clip the panel's drop shadow |
 
-Five functions, in one file, the only `unsafe` in the crate, each with the gap
-named above it. The right home for all five is `orca-win`, which was already
+Six functions, in one file, the only `unsafe` in the crate, each with the gap
+named above it. The right home for all six is `orca-win`, which was already
 merged and not being edited. **When `orca-win` is next opened they move there
 verbatim and the file disappears.** The interesting half — which display
 contains a point — is a pure function and is tested.
@@ -421,6 +422,186 @@ a `Send` future, and any future holding a GPUI type is `!Send`, because
 **The general rule:** anything that must run while the app is *idle* — tray
 polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
 live on the foreground executor. It is not a slow path, it is a dead one.
+
+## The window is transparent, and larger than the panel
+
+The popup is a rounded panel floating over the desktop rather than a window with
+a title bar, and three separate decisions have to hold for that to come out
+right. All three are in `crates/orca/src/ui.rs` and `main.rs`; recording them
+because each one is a plausible-looking thing to "simplify" back.
+
+**The window is bigger than the panel, on all four sides, by
+`ui::FRAME_MARGIN`.** Not decoration. The widest shadow in
+`Theme::panel_shadows` is a 56px blur offset 24px down, and a window sized to
+the panel clips its own shadow into a hard straight-edged rectangle. The
+consequence is that every placement calculation — `Bounds::centered`,
+`place_on_cursor`, the `rect=` in the show log — is in *window* coordinates, not
+panel coordinates, and the panel is centred inside it.
+
+**`WindowOptions::window_background` is `Transparent`, and the root view is not
+painted.** `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
+non-`Opaque` appearance and presents through a `DXGI_ALPHA_MODE_PREMULTIPLIED`
+Direct Composition swap chain, so scene pixels that were not painted are
+genuinely transparent. One side effect worth knowing: `Window::should_use_subpixel_rendering`
+returns `false` for any non-opaque appearance, so the query text is grayscale-antialiased
+inside the panel and on an opaque background.
+
+### Rounded corners: painted, not delegated to DWM
+
+`DWMWA_WINDOW_CORNER_PREFERENCE` looks like the answer and is not:
+
+* it is Windows 11 build 22000 and later, with a small set of radii (8px, 4px,
+  none) and no 16–20px option, which is what this design wants;
+* it rounds the **window**, and the window is deliberately larger than the panel,
+  so DWM would round the outside edge of the drop shadow — the one edge that has
+  to stay square;
+* it only reaches windows DWM redirects, and `gpui_windows` sets
+  `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled (the
+  default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set), in which
+  case DComp composites the window and DWM leaves it alone.
+
+Painting the radius has none of those constraints and is antialiased. The
+remaining Win32 call, `win::round_corners`, therefore *suppresses* the DWM
+preference (`DWMWCP_DONOTROUND`) rather than requesting one, so a Windows 11
+build cannot quietly reintroduce the clipped-shadow failure. It logs whether
+Windows accepted it, because that number is the only thing in the log that says
+which path the corners are taking.
+
+### The frosted backdrop is gone for now, and why
+
+**Removed 2026-10-03.** The panel was translucent and painted a blurred copy of
+the desktop behind itself. It is now an opaque card. The feature was cut while
+the launcher still has almost no features in it, on the grounds that the capture
+was the single most expensive thing on the keystroke path and the cheapest thing
+to get wrong. It is deferred, not abandoned: everything below is the reason it
+was not free, and it is the list to read before putting it back.
+
+The three modules are deleted — `orca_win::backdrop`, `orca_core::backdrop`,
+`orca::backdrop` — along with `image` as a direct dependency and the
+`Win32_Graphics_Gdi` feature on `orca-win`. `win::cursor_physical_and_scale`
+went with them; it existed only so the capture and the panel placement could not
+disagree about the cursor's monitor.
+
+**Why we could not use a system backdrop material.** `gpui` exposes
+`WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop,
+MicaAltBackdrop}` and `gpui_windows` implements all four through DWM. None of
+them fits, for a specific reason rather than a cautious one: they apply their
+material to the **whole window rectangle**. The window is larger than the panel,
+so a backdrop material would fill the shadow margin too and turn the rounded
+panel into a rounded *square* — worse than no material at all.
+
+**And the second obstacle, found by reading the backend rather than the docs.**
+`MicaBackdrop` goes through `DwmSetWindowAttribute`, and `gpui_windows` sets
+`WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
+default, off only when `DISABLE_DIRECT_COMPOSITION` is set. DWM backdrops are
+applied to windows DWM redirects, and a DirectComposition window is not
+redirected, so the attribute may do nothing visible at all. The documentation's
+"not always supported" is doing a lot of quiet work there.
+
+**What the capture cost.** GDI `BitBlt` off the screen DC, not
+`Windows.Graphics.Capture`: the modern API shows a consent dialog and returns a
+D3D frame pool to copy out of, which for blurring a few hundred thousand pixels
+per hotkey press is the wrong trade. Even so it measured 20–50ms, and it had to
+run while the window was hidden — `BitBlt` photographs the screen, so capturing
+with the popup up captures the popup. That precondition is what made the design
+awkward rather than cheap: the work had to be moved to the hide path and the
+startup path so the show path could stay instant, which in turn made the blur
+*stale* — showing what was behind the cursor at close, not at open. A launcher
+that opens 40ms late is worse than one whose frosted panel is a frame old.
+
+**The blur was a downsample, not a Gaussian.** `soften` box-averaged by 4,
+blurred the small buffer, and let the renderer's bilinear filter stretch it back.
+The bilinear upscale is just the last box in a separable chain, so it reads like
+a wide Gaussian and costs about 16× less, because the expensive step runs on
+1/16th of the pixels. `DOWNSAMPLE = 4` was a balance with both failure
+directions visible: too large and the upscale shows as faint diagonal banding,
+too small and it stops being cheap and reappears as keystroke latency.
+
+**Two bugs in that code, named because they are the ones that would come back
+with it:**
+
+* **Alpha was normalised by the window width instead of the number of samples
+  actually taken.** At an edge the window runs off the image, so every border
+  lost opacity and the loss compounded through each pass. The visible symptom is
+  a flat image coming out with translucent edges — a dark band down the right and
+  bottom of the panel, which reads as "the shadow is wrong".
+* **A GDI handle leak waiting to happen.** A memory DC with a bitmap still
+  selected into it cannot be deleted without leaking the bitmap, and a screen DC
+  must be released with `ReleaseDC` while a memory DC is destroyed with
+  `DeleteDC`. There is no reliable query for which kind you have, so the guard
+  recorded it at creation. Getting this backwards leaks a handle on every hotkey
+  press.
+
+**What to do when it comes back.** Keep the capture off the show path — the
+blur is the cheap part of this feature and the latency is not. Do not
+reintroduce `Win32_Graphics_Gdi` on `orca-win` for it: `orca` calls
+`MonitorFromPoint` and now declares that feature itself, because a feature
+another crate in the graph happens to enable is not a dependency.
+
+### The window frame: `Transparent` asks Windows for a border
+
+`WindowBackgroundAppearance::Transparent` — the value this whole design rests on
+— puts a **one-pixel border around the entire window**, and the popup looked
+like a dialog with a rounded panel inside it until this was found.
+
+It is not a GPUI rendering decision, and it is not a consequence of the swap
+chain being transparent. `gpui_windows` maps each appearance onto
+`SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
+`Transparent` it sends:
+
+| field | value | meaning |
+|---|---|---|
+| `accent_state` | 2 | `ACCENT_ENABLE_TRANSPARENTGRADIENT` |
+| `accent_flags` | 2 | **`WCA_ACCENT_FLAG_DRAW_ALLBORDERS`** |
+
+`Opaque` sends `accent_state = 0` instead, which is why the border is *new*
+rather than pre-existing — choosing transparency is precisely what asks Windows
+for it. Read it in `gpui_windows/src/window.rs`, `set_background_appearance`
+and `set_window_composition_attribute`.
+
+The two mechanisms are independent, which is what makes it fixable in six lines:
+the per-pixel alpha comes from the Direct Composition swap chain being cleared
+to `[0, 0, 0, 0]`, **not** from the accent policy. So `win::clear_window_frame`
+sends `accent_state = 0` (`WCA_ACCENT_ENABLE_NONE`) after GPUI has set the
+appearance. The frame goes, the shadow margin stays transparent.
+
+`SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
+cached, because it is not exported by name in any import library. The
+`AccentPolicy` and `WINDOWCOMPOSITIONATTRIBDATA` structs are declared locally —
+the `windows` crate at 0.62 does not export them, and `gpui_windows` declares
+the identical two. `#[repr(C)]` and the field order are load-bearing, because
+both cross into user32 by pointer.
+
+**The general lesson:** "transparent window" is two separate Windows features
+that happen to be requested together, and turning on the wrong one is invisible
+until a human looks at a screenshot. Anything that reads as a window
+*decoration* — border, shadow, corner — is DWM's business, not the renderer's,
+and has to be checked separately from anything that reads as pixel content.
+
+### The panel is opaque, and the fills on top of it are not
+
+The panel fill itself is opaque — it is a card sitting over the desktop, and
+anything with an alpha there would put the desktop's own text behind the
+launcher's text. So a contrast check against the panel's RGB needs no help.
+
+Everything painted *inside* the panel is a different matter. The selection fill,
+the footer pills and the border are alpha-blended over the panel rather than
+replacing it: a selection is a lightening of the card it sits on, not a colour of
+its own. So `theme.rs`'s tests still carry their own source-over, and assert every
+pairing against the fill composited onto the panel.
+
+The subtlety that cost a test, and that is worth keeping for when the frosted
+backdrop comes back: a selection highlight does not sit on the desktop, it sits on
+the panel. Compositing a 10%-white highlight directly against a white wallpaper
+scores it at 1.00:1 and produces a failing test that describes nothing the user
+would ever see. It is the strongest argument in this file for testing against the
+real compositing chain rather than against the constants that feed it.
+
+While the panel *was* translucent, that same test also bounded its alpha from both
+sides: too opaque and the translucency was gone, too transparent and `dim` stopped
+clearing 4.5:1 over a light wallpaper. With the backdrop removed, the panel's
+alpha is simply 1.0 and `the_panel_is_opaque` asserts it — which is not redundant,
+because an alpha of 0.9 passes every other test in the file.
 
 ## `Window::activate_window` is asynchronous, and that matters
 
@@ -562,6 +743,74 @@ If a report says "it will not open" and the log says `visible=true
 foreground=false`, the problem is z-order or activation, not lifecycle. If it
 says `visible=false`, the window was never shown. If the rect is empty or
 degenerate, it was moved somewhere it cannot be seen.
+
+## A Win32 error code names the *category*, not the call site
+
+`ERROR_RESOURCE_TYPE_NOT_FOUND` (1813) from the tray icon sent two rounds of
+investigation to `CreateWindowExW`, and the window had been working the whole
+time.
+
+The chain was three mistakes in one function, not one bug in one call:
+
+1. `load_icon` verified the stock icon with
+   `LoadImageW(None, IDI_APPLICATION, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE)`. A size
+   of 0 plus `LR_DEFAULTSIZE` is not a reliable way to fetch a *system* icon;
+   `LoadIconW` is. The call fails, and it fails for environmental reasons — not
+   because anything is missing.
+2. That verification was **fatal**. But `hIcon: NULL` in `NOTIFYICONDATAW` makes
+   the shell draw its own default, which is exactly what
+   `TrayIconSource::Application` is asking for. A cosmetic difference in the icon
+   was taking down the entire tray.
+3. The error it returned was `WindowCreationFailed`. 1813 reads as "class not
+   found", so the message pointed at class registration and window creation, and
+   nobody read the function that actually failed.
+
+### Both fixes at once, which is why neither error message was right
+
+A second line of work concluded from the other end: `load_icon` used to load the
+icon *purely as a check* and then return `None`, throwing the handle away, so
+`NIM_ADD` went out with `NIF_ICON` claimed and a null `hIcon`. The notification
+area got an entry the shell could not draw — a blank slot, with no error anywhere.
+
+Both diagnoses were right about their own half and neither was right overall:
+
+| | believed | actually |
+|---|---|---|
+| one line of work | the tray was fine, the *probe* was fatal | the tray was absent, and the probe was why |
+| the other | the icon had to be loaded for real | loading it must never be allowed to fail the install |
+
+So the resolved `load_icon` uses the call that works (`LoadIconW`) **and** refuses
+to be fatal: a failure returns `Ok(None)`, the caller declines `NIF_ICON`, and the
+shell draws its default. The accepted cost is that this one failure is now
+silent, which is the right way round — the alternative is a resident launcher
+whose only exit is a tray menu that did not appear.
+
+Two rules came out of it:
+
+- **A diagnostic that names the wrong thing is worse than none.** One enum
+  variant now covers exactly one failure: `SetupFailed { at, code }` names the
+  call, and `IconLoadFailed { path, code }` is separate because a path is the one
+  thing the person reading the log can act on. A name has to be falsifiable by
+  reading the failing function. `SetLastError(0)` runs before `RegisterClassW`,
+  because naming the failing call is only worth something if the code belongs to
+  it.
+- **An error code is a category, not a location.** 1813 is
+  "resource type not found", which is *consistent* with a missing class, a
+  missing icon resource, or a missing icon file. Reading it as proof of which
+  call failed is what wasted the time.
+
+The thing that actually found it was instrumenting the real function and
+printing the class name it was about to register. A replica test built outside
+the function could only have tested a guess: every variable — the class name
+format, `WS_POPUP` on and off, `HWND_MESSAGE` on and off, non-null `lpParam`, and
+running on a spawned thread — passed in isolation. Replicas prove a hypothesis
+about the variables you already suspect. When a bug survives that, suspect the
+function you have not read.
+
+Related: [`orca-win/src/tray.rs`](crates/orca-win/src/tray.rs) has
+`a_real_tray_icon_installs_and_uninstalls`, which exercises class, window, icon,
+and notify against the live shell. A mocked `Shell_NotifyIconW` cannot catch any
+of this, because the mock only ever runs the step *after* the one that broke.
 
 ## Window class names may not contain `(` or `)`
 
