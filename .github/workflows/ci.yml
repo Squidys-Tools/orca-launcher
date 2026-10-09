@@ -30,7 +30,9 @@ jobs:
           path-type: inherit
 
       - name: Install GNU toolchain
-        run: rustup show
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile default
+          rustup show
 
       - name: Cache build output
         uses: actions/cache@v4
