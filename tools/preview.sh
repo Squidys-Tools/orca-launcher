@@ -6,6 +6,20 @@ if [[ "$(uname -s)" != Linux ]]; then
   exit 2
 fi
 
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  for socket in /tmp/.X11-unix/X*; do
+    [[ -S "$socket" ]] || continue
+    DISPLAY=":${socket##*X}"
+    export DISPLAY
+    break
+  done
+fi
+
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+  printf '%s\n' 'No graphical session found; set DISPLAY or WAYLAND_DISPLAY.' >&2
+  exit 2
+fi
+
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
 channel="$(awk -F '\"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
