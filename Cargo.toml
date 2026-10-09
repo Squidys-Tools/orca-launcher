@@ -5,6 +5,7 @@ members = [
     "crates/orca-win",
     "crates/orca",
     "crates/orca-probe",
+    "crates/orca-preview",
 ]
 
 [workspace.package]

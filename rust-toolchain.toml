@@ -1,7 +1,6 @@
 [toolchain]
-# This is a Windows-only project built with the GNU toolchain. There is no
-# Visual Studio / MSVC toolchain on the build machines, so the host triple is
-# pinned here rather than left to rustup's default.
+# This Windows-only app intentionally uses the GNU toolchain instead of MSVC.
+# Pin the host triple so rustup does not silently use its platform default.
 channel = "stable-x86_64-pc-windows-gnu"
 components = ["rustfmt", "clippy"]
 profile = "default"

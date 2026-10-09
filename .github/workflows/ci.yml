@@ -13,16 +13,26 @@ env:
 
 jobs:
   check:
-    # MSVC-hosted runners cannot cross-compile to the GNU target, so we use a
-    # self-hosted Windows agent that already has the GNU toolchain installed.
-    # If this workflow has never run successfully, that agent is not configured
-    # yet and CI is effectively local-only.
-    runs-on: [self-hosted, windows]
+    # Run natively on Windows, but use GNU rather than the runner's MSVC toolchain.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install MinGW linker
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
       - name: Install GNU toolchain
-        run: rustup show
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile default
+          rustup show
 
       - name: Cache build output
         uses: actions/cache@v4
