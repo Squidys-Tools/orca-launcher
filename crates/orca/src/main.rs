@@ -58,7 +58,9 @@ use gpui::prelude::*;
 use gpui::*;
 
 use orca_core::config::{Config, ConfigPaths};
-use orca_core::providers::{CommandProvider, EnvVarProvider, ProviderSet};
+use orca_core::providers::{
+    CalculatorProvider, CommandProvider, EnvVarProvider, ProviderSet, QueryProviders,
+};
 use orca_core::store::sqlite::SqliteUsageStore;
 use orca_core::store::UsageStore;
 use orca_win::{
@@ -201,6 +203,11 @@ fn open_history(paths: &ConfigPaths) -> Arc<Mutex<Box<dyn UsageStore + Send>>> {
 }
 
 /// Builds the provider set and wraps it in the search engine.
+///
+/// Two sets, because there are two seams. [`ProviderSet`] is query-blind and
+/// collected once per process; [`QueryProviders`] answers the query itself and
+/// is asked per keystroke. Wiring them separately means a build without a
+/// calculator never mentions one.
 fn build_engine(config: &Config, history: Arc<Mutex<Box<dyn UsageStore + Send>>>) -> Arc<Engine> {
     // Registration order is de-duplication order: the first provider to offer an
     // id wins. Installed applications come first because their ids are
@@ -217,10 +224,15 @@ fn build_engine(config: &Config, history: Arc<Mutex<Box<dyn UsageStore + Send>>>
             EnvVarProvider::new(std::env::vars()),
         );
 
+    // Answers, not candidates. Each of these is a function of the query, so
+    // there is nothing to collect and nothing to cache.
+    let responders = QueryProviders::new().with("calculator", CalculatorProvider);
+
     let catalog = Catalog::new(providers, config.files.clone());
     log(&format!(
-        "providers: {}",
-        catalog.provider_names().join(", ")
+        "providers: {} | answers: {}",
+        catalog.provider_names().join(", "),
+        responders.names().join(", ")
     ));
 
     let lister: Arc<dyn orca_core::providers::DirectoryLister + Send + Sync> =
@@ -231,6 +243,7 @@ fn build_engine(config: &Config, history: Arc<Mutex<Box<dyn UsageStore + Send>>>
         history,
         config.ranking_policy(),
         config.general.max_results,
+        responders,
     )
 }
 
@@ -697,9 +710,12 @@ mod tests {
     // dependency on `orca-win`'s hotkey types visible at the top of the module
     // rather than inherited by accident.
     use orca_core::config::HotkeySpec;
+    use orca_core::store::MemoryUsageStore;
+    use orca_core::Source;
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
+    use std::sync::{Arc, Mutex};
 
-    use super::{spawn_command_pump, UiCommand, WINDOW_HEIGHT, WINDOW_WIDTH};
+    use super::{build_engine, spawn_command_pump, UiCommand, WINDOW_HEIGHT, WINDOW_WIDTH};
     // The panel dimensions and the margin are not used outside this module, so
     // they are imported here rather than at the crate root where they would be
     // dead code in the binary.
@@ -758,6 +774,43 @@ mod tests {
         assert_eq!(hotkey.key, Key::Space);
         assert!(hotkey.modifiers.contains(Modifiers::CTRL));
         assert!(hotkey.modifiers.contains(Modifiers::SHIFT));
+    }
+
+    /// The one link no other test covers: that the composition root actually
+    /// registers the query-shaped seam. Every unit test builds its own
+    /// `Engine`, so a deleted `.with("calculator", …)` line in `build_engine`
+    /// would pass all of them and the feature would silently stop answering.
+    ///
+    /// This goes through the real `build_engine`, which means it enumerates the
+    /// real Start Menu and reads the real environment. That is the same class of
+    /// test `crates/orca/src/providers.rs` already runs against the real
+    /// filesystem, and the cost is a second or two of collection.
+    #[test]
+    fn the_engine_the_composition_root_builds_answers_an_expression() {
+        let engine = build_engine(
+            &orca_core::config::Config::default(),
+            Arc::new(Mutex::new(
+                Box::new(MemoryUsageStore::new()) as Box<dyn orca_core::store::UsageStore + Send>
+            )),
+        );
+
+        let outcome = engine.search("2*(3+4)", 1);
+        assert_eq!(outcome.error, None);
+        let answer = outcome
+            .rows
+            .iter()
+            .find(|row| row.item.source == Source::Calculator)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no calculator row: build_engine does not register the seam. rows: {:?}",
+                    outcome
+                        .rows
+                        .iter()
+                        .map(|r| r.item.title.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(answer.item.title, "14");
     }
 
     #[test]

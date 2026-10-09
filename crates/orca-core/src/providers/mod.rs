@@ -18,6 +18,13 @@
 //! | [`EnvVarProvider`] | [`Source::Command`] | an injected variable list |
 //! | [`FileSearchProvider`] | [`Source::File`] / [`Source::Folder`] | an injected [`DirectoryLister`] |
 //!
+//! # The second seam
+//!
+//! [`QueryProvider`] answers the query itself rather than serving a catalogue,
+//! and it exists because `collect`'s query-blindness cannot be relaxed: there is
+//! no such thing as "every arithmetic expression". See [`crate::providers::query`]
+//! for the whole argument, which is a design note rather than a footnote.
+//!
 //! # Why the directory seam exists
 //!
 //! Layering rule 2 puts the filesystem outside this crate. So
@@ -387,13 +394,17 @@ impl ProviderError {
     }
 }
 
+pub mod calculator;
 pub mod commands;
 pub mod env;
 pub mod files;
+pub mod query;
 
+pub use calculator::{evaluate, format_value, CalculatorProvider};
 pub use commands::{Alias, CommandProvider};
 pub use env::{looks_like_path, EnvVar, EnvVarProvider};
 pub use files::{DirectoryLister, FileSearchProvider, InMemoryDirectory, WalkLimits};
+pub use query::{QueryProvider, QueryProviders};
 
 #[cfg(test)]
 mod tests {

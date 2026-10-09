@@ -19,8 +19,9 @@ Working today:
 - Ranking by match tier — prefix, word boundary, substring, fuzzy — weighted by
   launch frequency and recency, with a SQLite usage store behind it.
 
-Not built: clipboard, calculator, web search, result icons, a settings window, an
-installer. The frosted-glass backdrop was deliberately
+Not built: clipboard, web search, result icons, a settings window, an installer.
+The calculator ships — type an expression and <kbd>Enter</kbd> puts the answer on
+the clipboard. The frosted-glass backdrop was deliberately
 [removed](docs/ARCHITECTURE.md) while the feature list was this short; it is
 deferred, not abandoned.
 

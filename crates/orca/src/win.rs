@@ -1,5 +1,6 @@
 //! The five Win32 calls the composition root needs that `orca-win` does not
-//! expose, and one pure function that decides which monitor a point is on.
+//! expose, and two pure functions that decide things Win32 is then asked to do:
+//! which monitor a point is on, and what a launch target amounts to.
 //!
 //! # Why this file exists, and why it is five functions
 //!
@@ -507,52 +508,115 @@ pub fn display_under_cursor(app: &App) -> Option<DisplayId> {
     display_containing(cursor, &displays)
 }
 
-/// Opens a launch target with whatever Windows associates with it.
+/// What activating a [`LaunchTarget`] amounts to.
+///
+/// Split out of [`shell_open`] for the same reason `hide_plan` is split out of
+/// the hide path: the decision is a table, and a table can be tested without a
+/// desktop. The clipboard arm is the one that earns the split — a target that
+/// reached `ShellExecuteW` by mistake would open a browser *and* copy, and
+/// nothing on screen would say which happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenAction {
+    /// Hand it to `ShellExecuteW`.
+    Shell {
+        /// The file, URI, or resolved program path.
+        file: String,
+        /// The parameter string, already quoted.
+        parameters: String,
+    },
+    /// Put `text` on the clipboard and open nothing.
+    Copy {
+        /// The text to place on the clipboard.
+        text: String,
+    },
+}
+
+/// Decides what activating `target` does, or that it cannot be done.
+///
+/// `None` means the target names something that does not resolve — an alias
+/// whose program is not on `PATH`. There is nothing to show the user about it:
+/// a config error surfaces as "it does not work", which is the honest signal.
+#[must_use]
+pub fn open_action(target: &LaunchTarget) -> Option<OpenAction> {
+    match target {
+        // A computed answer is not a thing to open. There is no file, no URI,
+        // and no process; the launcher's job is to put the number where the user
+        // can paste it.
+        LaunchTarget::CopyToClipboard(text) => Some(OpenAction::Copy { text: text.clone() }),
+        LaunchTarget::Executable { path, args } => Some(OpenAction::Shell {
+            file: path.to_string_lossy().into_owned(),
+            parameters: quote_arguments(args),
+        }),
+        LaunchTarget::Uri(uri) => Some(OpenAction::Shell {
+            file: uri.clone(),
+            parameters: String::new(),
+        }),
+        // An alias is typed by name, so it means nothing until `PATH` has been
+        // searched. An unresolvable alias is a config error the user finds out
+        // about by it not working; there is nothing to show them.
+        LaunchTarget::Command { program, args } => {
+            resolve_program(program).map(|path| OpenAction::Shell {
+                file: path.to_string_lossy().into_owned(),
+                parameters: quote_arguments(args),
+            })
+        }
+    }
+}
+
+/// Opens a launch target with whatever Windows associates with it, or copies it
+/// to the clipboard when that is what the target asks for.
 ///
 /// `ShellExecuteW` rather than `CreateProcess` because the whole point of a URI
 /// target is "whatever the user has set as the default handler", and because it
 /// is the one call that handles argument quoting for us.
 pub fn shell_open(target: &LaunchTarget) -> bool {
-    let (file, parameters) = match target {
-        LaunchTarget::Executable { path, args } => {
-            (path.to_string_lossy().into_owned(), quote_arguments(args))
+    match open_action(target) {
+        // The target names something that does not resolve — an alias whose
+        // program is not on `PATH`. Nothing to report; see `open_action`.
+        None => false,
+        Some(OpenAction::Copy { text }) => {
+            // A failure here is logged and nothing else. The popup is about to
+            // close, there is no UI for a clipboard error, and a launcher that
+            // turns Enter into a dialog has traded a small problem for a large
+            // one.
+            match orca_win::set_clipboard_text(&text) {
+                Ok(()) => true,
+                Err(error) => {
+                    log(&format!("clipboard: {error}"));
+                    false
+                }
+            }
         }
-        LaunchTarget::Uri(uri) => (uri.clone(), String::new()),
-        // An alias is typed by name, so it means nothing until `PATH` has been
-        // searched. An unresolvable alias is a config error the user finds out
-        // about by it not working; there is nothing to show them.
-        LaunchTarget::Command { program, args } => match resolve_program(program) {
-            Some(path) => (path.to_string_lossy().into_owned(), quote_arguments(args)),
-            None => return false,
-        },
-    };
+        Some(OpenAction::Shell { file, parameters }) => {
+            // The four buffers are locals, not temporaries: `ShellExecuteW` takes
+            // `PCWSTR` pointers, and a pointer into a dropped `HSTRING` would be
+            // the kind of bug that only shows up on a machine with a different
+            // allocator.
+            let verb = HSTRING::from("open");
+            let file = HSTRING::from(file);
+            let parameters = HSTRING::from(parameters);
 
-    // The four buffers are locals, not temporaries: `ShellExecuteW` takes
-    // `PCWSTR` pointers, and a pointer into a dropped `HSTRING` would be the
-    // kind of bug that only shows up on a machine with a different allocator.
-    let verb = HSTRING::from("open");
-    let file = HSTRING::from(file);
-    let parameters = HSTRING::from(parameters);
+            // SAFETY: all four `HSTRING`s above are live for the duration of the
+            // call, and a null window handle means "no owner", which is what a
+            // background process wants.
+            let result = unsafe {
+                ShellExecuteW(
+                    None,
+                    PCWSTR(verb.as_ptr()),
+                    PCWSTR(file.as_ptr()),
+                    PCWSTR(parameters.as_ptr()),
+                    PCWSTR::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
 
-    // SAFETY: all four `HSTRING`s above are live for the duration of the call,
-    // and a null window handle means "no owner", which is what a background
-    // process wants.
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR(parameters.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-
-    // `ShellExecuteW` signals failure by returning a value at or below 32, not
-    // by returning null, and it does not set the extended error code. Those
-    // values are the `SE_ERR_*` codes; anything above is the instance handle of
-    // the process it started.
-    result.0 as isize > SHELLEXECUTE_REFUSAL_CEILING
+            // `ShellExecuteW` signals failure by returning a value at or below 32,
+            // not by returning null, and it does not set the extended error code.
+            // Those values are the `SE_ERR_*` codes; anything above is the
+            // instance handle of the process it started.
+            result.0 as isize > SHELLEXECUTE_REFUSAL_CEILING
+        }
+    }
 }
 
 /// The largest value `ShellExecuteW` returns when it refused, inclusive.
@@ -704,6 +768,73 @@ mod tests {
             display_containing((2000.0, 100.0), &displays),
             Some(DisplayId::new(2))
         );
+    }
+
+    // The whole reason `open_action` exists rather than living inline in
+    // `shell_open`: which arm a target takes is a table, and a table can be
+    // tested without a desktop, a browser, or a clipboard.
+
+    /// A computed answer copies. It must never reach `ShellExecuteW`, which
+    /// would try to open a file named `14` or launch a URI with no scheme.
+    #[test]
+    fn a_clipboard_target_copies_and_never_opens() {
+        let target = LaunchTarget::CopyToClipboard("14".to_owned());
+        assert_eq!(
+            open_action(&target),
+            Some(OpenAction::Copy {
+                text: "14".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn an_executable_target_opens_with_its_quoted_arguments() {
+        let target = LaunchTarget::Executable {
+            path: PathBuf::from(r"C:\apps\notepad.exe"),
+            args: vec!["a b".to_owned()],
+        };
+        assert_eq!(
+            open_action(&target),
+            Some(OpenAction::Shell {
+                file: r"C:\apps\notepad.exe".to_owned(),
+                parameters: "\"a b\"".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_uri_target_opens_with_no_parameters() {
+        let target = LaunchTarget::Uri("https://example.com/?q=orca".to_owned());
+        assert_eq!(
+            open_action(&target),
+            Some(OpenAction::Shell {
+                file: "https://example.com/?q=orca".to_owned(),
+                parameters: String::new(),
+            })
+        );
+    }
+
+    /// An unresolvable alias is a refusal, not an error: there is nothing to
+    /// show the user, and `shell_open` returning `false` is the honest outcome.
+    #[test]
+    fn an_alias_whose_program_is_nowhere_on_the_path_refuses() {
+        let target = LaunchTarget::Command {
+            program: "orca-no-such-program-on-any-machine".to_owned(),
+            args: Vec::new(),
+        };
+        assert_eq!(open_action(&target), None);
+    }
+
+    /// An empty program name must not silently resolve to something. It has
+    /// always returned `None`; this pins the behaviour now that the arm is
+    /// reachable through a tested function.
+    #[test]
+    fn an_empty_program_name_refuses() {
+        let target = LaunchTarget::Command {
+            program: String::new(),
+            args: Vec::new(),
+        };
+        assert_eq!(open_action(&target), None);
     }
 
     #[test]

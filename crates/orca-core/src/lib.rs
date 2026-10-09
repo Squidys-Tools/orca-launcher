@@ -40,7 +40,7 @@
 //! | [`text`] | case folding and word segmentation |
 //! | [`config`] | `config.toml` loading, validation, and path construction |
 //! | [`store`] | the [`store::UsageStore`] trait, memory and SQLite backends |
-//! | [`providers`] | the [`providers::ResultProvider`] trait and its pure impls |
+//! | [`providers`] | the [`providers::ResultProvider`] seam and its pure impls, plus the [`providers::QueryProvider`] seam for answers to the query |
 //!
 //! # Where a caller starts
 //!
@@ -85,5 +85,8 @@ pub use matching::{
 pub use model::{LaunchTarget, ResultItem, Source};
 pub use policy::{RankingPolicy, WeightTable};
 pub use providers::looks_like_path;
-pub use providers::{ProviderError, RawResult, ResultProvider};
+pub use providers::{
+    evaluate, format_value, CalculatorProvider, ProviderError, QueryProvider, QueryProviders,
+    RawResult, ResultProvider,
+};
 pub use rank::{rank, rank_at, rank_with, RankedItem};
