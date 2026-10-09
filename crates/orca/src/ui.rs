@@ -245,7 +245,7 @@ pub struct Launcher {
     pub window: Option<WindowHandle<LauncherView>>,
     /// The popup's raw handle, captured once when the window is created so
     /// hide/show does not have to go back through GPUI.
-    pub hwnd: Option<windows::Win32::Foundation::HWND>,
+    pub hwnd: Option<crate::win::Hwnd>,
     /// Whether the popup is on screen.
     pub shown: bool,
 
