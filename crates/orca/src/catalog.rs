@@ -231,6 +231,7 @@ pub struct Engine {
     policy: RankingPolicy,
     max_results: usize,
     responders: QueryProviders,
+    collecting: Mutex<()>,
     cached: Mutex<Option<Shared>>,
 }
 
@@ -252,6 +253,7 @@ impl Engine {
             policy,
             max_results,
             responders,
+            collecting: Mutex::new(()),
             cached: Mutex::new(None),
         })
     }
@@ -320,10 +322,18 @@ impl Engine {
     }
     /// Collects, caches, and returns the catalogue.
     ///
-    /// A poisoned lock is reported rather than panicked on: the lock is only
-    /// ever held across a pure pointer clone, so poisoning means something else
-    /// went wrong and the useful recovery is to collect again.
+    /// A poisoned lock is reported rather than panicked on. The collection lock
+    /// serializes cold misses, while the cache lock is held only to clone or
+    /// replace the shared pointer.
     pub fn collect_and_cache(&self) -> Result<Shared, String> {
+        let _collecting = self
+            .collecting
+            .lock()
+            .map_err(|_| "catalogue collection lock was poisoned".to_owned())?;
+        if let Some(cached) = self.cached() {
+            return Ok(cached);
+        }
+
         let history = self
             .history
             .lock()
@@ -597,10 +607,28 @@ mod tests {
         // The regression this guards: a per-keystroke `collect_all`. A second
         // `search` must not re-enumerate, which is only observable if the
         // catalogue handle is the *same* allocation.
-        let providers = ProviderSet::new().with(
-            "apps",
-            fixed_provider(&[("app:note", "Notepad", Source::Application)]),
-        );
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingProvider(Arc<AtomicUsize>);
+
+        impl ResultProvider for CountingProvider {
+            fn name(&self) -> &str {
+                "apps"
+            }
+
+            fn collect(&self) -> Result<Vec<RawResult>, ProviderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![RawResult::new(
+                    "app:note",
+                    "Notepad",
+                    Source::Application,
+                    exe("notepad"),
+                )])
+            }
+        }
+
+        let collections = Arc::new(AtomicUsize::new(0));
+        let providers = ProviderSet::new().with("apps", CountingProvider(Arc::clone(&collections)));
         let catalog = Catalog::new(providers, empty_files());
         let engine = Engine::new(
             catalog,
@@ -620,6 +648,13 @@ mod tests {
             .cached()
             .expect("the first search populates the cache");
         assert!(Arc::ptr_eq(&after_first, &engine.cached().unwrap()));
+        assert_eq!(collections.load(Ordering::Relaxed), 1);
+
+        let collected_again = engine
+            .collect_and_cache()
+            .expect("the existing catalogue should be reused");
+        assert!(Arc::ptr_eq(&collected_again, &after_first));
+        assert_eq!(collections.load(Ordering::Relaxed), 1);
 
         let second = engine.search("note", 2);
         assert_eq!(second.rows.len(), 1);
