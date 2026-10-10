@@ -219,19 +219,24 @@ mod tests {
 
     #[test]
     fn the_std_fs_lister_classifies_a_real_file_and_a_real_directory() {
-        let dir = std::env::temp_dir();
+        let dir = std::env::temp_dir().join(format!("orca-lister-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create a temp directory fixture");
+        let file = dir.join("orca-lister-file");
+        std::fs::write(&file, b"fixture").expect("write a temp file fixture");
+
         let lister = StdFsDirectory;
         assert_eq!(lister.kind(&dir), Some(EntryKind::Directory));
+        assert_eq!(lister.kind(&file), Some(EntryKind::File));
         assert_eq!(lister.kind(&dir.join("orca-lister-does-not-exist")), None);
 
         let listed = lister
             .list(&dir)
             .expect("the temp directory is always listable");
-        assert!(
-            !listed.is_empty(),
-            "an empty temp dir is not a valid test env"
-        );
+        assert!(listed.contains(&file));
         assert!(listed.iter().all(|path| path.is_absolute()));
+
+        std::fs::remove_dir_all(&dir).expect("remove the temp directory fixture");
     }
 
     #[test]

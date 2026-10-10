@@ -127,6 +127,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
+/// The native window handle passed across the UI/platform boundary.
+pub type Hwnd = HWND;
+
 /// Win32's baseline DPI. A monitor reporting this is at 100% scaling.
 const BASELINE_DPI: f32 = 96.0;
 

@@ -5,10 +5,26 @@ mistakes here are both silent: a wrong toolchain, and a truncated error.
 
 ## Build: GNU only, and never trust the default toolchain
 
-This project targets `x86_64-pc-windows-gnu` exclusively. An MSVC clippy run
-will *succeed* while checking the wrong target, so "it compiled" is not evidence
-on its own. `rust-toolchain.toml` pins the toolchain and `.cargo/config.toml`
-pins the target, so a bare `cargo build` is already correct.
+The production app targets `x86_64-pc-windows-gnu`. An MSVC clippy run will
+*succeed* while checking the wrong target, so "it compiled" is not evidence on
+its own. `rust-toolchain.toml` pins the toolchain and `.cargo/config.toml` pins
+the target, so a bare `cargo build` is already correct for the Windows app.
+
+## Developing on Windows and Linux
+
+- **Windows is the runtime source of truth.** Run `./tools/gate.ps1` to verify
+  code changes; runtime checks use `./tools/run.ps1` and belong to the human.
+- **Linux is for UI iteration only.** Use the Linux host toolchain and explicit
+  target for static checks:
+  ```bash
+  RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu cargo build -p orca-preview --target x86_64-unknown-linux-gnu
+  RUSTUP_TOOLCHAIN=stable-x86_64-unknown-linux-gnu cargo clippy -p orca-preview --target x86_64-unknown-linux-gnu -- -D warnings
+  ```
+  For a human visual check, run `./tools/preview.sh` or Setup's command named
+  `UI preview (Linux)` in a graphical session. It reuses `ui.rs` with sample
+  results and fake platform hooks, so it cannot verify Windows focus, tray,
+  transparency, real app launching, or other Windows runtime behavior. Agents
+  must not launch it or capture screenshots.
 
 ## Run the app: `./tools/run.ps1`
 

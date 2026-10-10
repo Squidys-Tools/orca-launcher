@@ -28,6 +28,21 @@ for checking a change, not for launching, and I run it before handing work over.
 `run.log` matters. Every lifecycle decision below is logged, so most of these
 checks are answerable by reading it rather than by guessing from the screen.
 
+## Linux UI preview
+
+On a Linux machine with a graphical session, run:
+
+```bash
+./tools/preview.sh
+```
+
+This opens the production `ui.rs` view with sample command results. Search and
+selection are live; activating a result is deliberately a no-op and closes the
+preview. Check layout, colors, text, row selection, and footer spacing on the
+screen. The preview uses a normal opaque Linux window, so its decorations,
+transparency, focus behavior, and text input are not evidence about Windows.
+The Windows launcher and its Win32 integrations still need the checks below.
+
 > If the build prints no `Compiling` lines and finishes instantly, nothing was
 > rebuilt and the binary may be stale. That is a bug, not a fast build — say so
 > rather than trusting the result.
