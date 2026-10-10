@@ -32,7 +32,7 @@ use std::fmt;
 use std::thread::sleep;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{GlobalFree, SetLastError, HANDLE, WIN32_ERROR};
+use windows::Win32::Foundation::{GetLastError, GlobalFree, SetLastError, HANDLE, WIN32_ERROR};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -195,6 +195,7 @@ fn place_unicode_text(units: &[u16]) -> Result<(), ClipboardError> {
     // and has not handed to anyone.
     let locked = unsafe { GlobalLock(handle) };
     if locked.is_null() {
+        let code = unsafe { GetLastError() }.0;
         // `GlobalLock` failed, so it did not increment the lock count and
         // there is nothing below to balance — unlocking a block that was never
         // locked corrupts the count for whoever locks it next.
@@ -206,7 +207,7 @@ fn place_unicode_text(units: &[u16]) -> Result<(), ClipboardError> {
         }
         return Err(ClipboardError::Failed {
             at: "GlobalLock",
-            code: unsafe { windows::Win32::Foundation::GetLastError() }.0,
+            code,
         });
     }
 

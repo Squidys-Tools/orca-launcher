@@ -329,7 +329,10 @@ impl Parser {
         }
     }
 
-    /// A run of digits with at most one decimal point, digits on both sides.
+    /// A run of digits with at most one decimal point and at least one digit
+    /// before it. Rust's `f64` parser accepts a trailing point, so `2.*3` is
+    /// valid; `atom` only calls this after seeing a leading digit, so `.5` is
+    /// not.
     ///
     /// No exponent notation: `1e3` is a rendering choice, not something a person
     /// types into a launcher's query bar, and accepting it would mean `2e` had
@@ -346,9 +349,6 @@ impl Parser {
             }
         }
         let text: String = self.chars[start..self.position].iter().collect();
-        // `"2."` does not parse, and neither does an empty slice, which is what
-        // a `.` with nothing after it produces. Both are errors rather than
-        // silent zeros.
         finite(text.parse::<f64>().ok()?)
     }
 }
@@ -378,6 +378,11 @@ mod tests {
         // Each line is one rule someone will otherwise "simplify" away.
         assert_eq!(evaluate("2+3*4"), Some(14.0));
         assert_eq!(evaluate("2*3^2"), Some(18.0));
+        assert_eq!(
+            evaluate("2.*3"),
+            Some(6.0),
+            "a trailing decimal point is valid"
+        );
         assert_eq!(evaluate("(2+3)*4"), Some(20.0));
         assert_eq!(
             evaluate("100/10/2"),
