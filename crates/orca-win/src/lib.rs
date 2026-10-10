@@ -2,9 +2,9 @@
 //!
 //! Everything in this crate talks to the operating system: binding a global
 //! hotkey, deciding whether this process is the primary instance, toggling
-//! autostart, the tray icon, enumerating installed applications, and raising a
-//! window to the front. The GPUI binary talks to this crate; this crate never
-//! talks to GPUI.
+//! autostart, the tray icon, enumerating installed applications, raising a
+//! window to the front, and putting text on the clipboard. The GPUI binary
+//! talks to this crate; this crate never talks to GPUI.
 //!
 //! # The seams
 //!
@@ -43,6 +43,7 @@ use std::fmt;
 
 mod apps;
 mod autostart;
+mod clipboard;
 mod foreground;
 mod hotkey;
 mod single_instance;
@@ -56,6 +57,7 @@ pub use autostart::{
     run_command_for, AutostartError, HkcuRunStore, RunValueStore, Win32Autostart,
     MAX_RUN_VALUE_LEN, RUN_KEY,
 };
+pub use clipboard::{set_clipboard_text, ClipboardError};
 pub use foreground::{activate, is_foreground, ForegroundError, WindowHandle};
 pub use hotkey::{
     hotkey_code, modifier_flags, virtual_key, GlobalHotkey, HotkeyBackend, HotkeyError,

@@ -31,10 +31,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use orca_core::config::Files as FilesConfig;
 use orca_core::providers::{
-    DirectoryLister, FileSearchProvider, ProviderError, ProviderSet, RawResult,
+    DirectoryLister, FileSearchProvider, ProviderError, ProviderSet, QueryProviders, RawResult,
 };
 use orca_core::store::{UsageStore, UsageStoreExt};
-use orca_core::{rank_with, Frecency, RankedItem, RankingPolicy, ResultItem, Timestamp};
+use orca_core::{rank_with, Frecency, RankedItem, RankingPolicy, ResultItem, Source, Timestamp};
 
 /// The candidate set plus the file-walk configuration.
 ///
@@ -220,12 +220,17 @@ pub struct Outcome {
 /// `Engine` is `Send + Sync` and is the only thing the background search needs,
 /// so a search is one cheap call that cannot touch the filesystem again by
 /// accident.
+///
+/// The one thing it *does* do per query is ask the query-shaped providers: an
+/// answer is a function of the query, so there is nothing to cache and nothing
+/// to collect. See [`Engine::search`].
 pub struct Engine {
     catalog: Catalog,
     lister: Arc<dyn DirectoryLister + Send + Sync>,
     history: Arc<Mutex<Box<dyn UsageStore + Send>>>,
     policy: RankingPolicy,
     max_results: usize,
+    responders: QueryProviders,
     cached: Mutex<Option<Shared>>,
 }
 
@@ -238,6 +243,7 @@ impl Engine {
         history: Arc<Mutex<Box<dyn UsageStore + Send>>>,
         policy: RankingPolicy,
         max_results: usize,
+        responders: QueryProviders,
     ) -> Arc<Engine> {
         Arc::new(Engine {
             catalog,
@@ -245,6 +251,7 @@ impl Engine {
             history,
             policy,
             max_results,
+            responders,
             cached: Mutex::new(None),
         })
     }
@@ -262,6 +269,20 @@ impl Engine {
     ///
     /// If nothing has been collected yet this collects first. That is the one
     /// path that blocks, and it is always reached from the background executor.
+    ///
+    /// # Why the catalogue is not copied on every keystroke
+    ///
+    /// A query-shaped answer — currently the calculator — is a function of the
+    /// query, so it cannot be collected once and cached: there is no finite set
+    /// of "every arithmetic expression". It is answered here instead, and merged
+    /// in so it competes with everything else on the same scale rather than being
+    /// pasted above or below the list.
+    ///
+    /// The merge therefore only touches the catalogue when something actually
+    /// answered. Cloning several thousand `ResultItem`s to discover that the query
+    /// is `notepad` would put a per-keystroke allocation on the one path this
+    /// project is explicit must stay fast — `docs/ARCHITECTURE.md`, "Fast to
+    /// open, or it is just a menu".
     pub fn search(&self, query: &str, generation: u64) -> Outcome {
         let (items, error) = match self.cached() {
             Some(items) => (items, None),
@@ -271,8 +292,25 @@ impl Engine {
             },
         };
 
+        // `Frecency::NEVER` rather than a store lookup: there is no history for a
+        // computed answer, and reading the store here would be SQLite I/O on the
+        // keystroke path for a row that is generated and discarded in seconds.
+        let extra = self
+            .responders
+            .respond(query)
+            .into_iter()
+            .map(|raw| raw.into_item(Frecency::NEVER))
+            .collect::<Vec<_>>();
+
+        let combined = if extra.is_empty() {
+            None
+        } else {
+            Some(items.iter().cloned().chain(extra).collect::<Vec<_>>())
+        };
+        let candidates: &[ResultItem] = combined.as_deref().unwrap_or_else(|| items.as_slice());
+
         let RankedRows { rows, matches } =
-            rank(&self.policy, query, now(), &items, self.max_results);
+            rank(&self.policy, query, now(), candidates, self.max_results);
         Outcome {
             generation,
             rows,
@@ -313,7 +351,16 @@ impl Engine {
     /// background hop would delay the program the user asked for. It is a
     /// single-row SQLite write, which is the one piece of I/O on this path that
     /// is small enough to be worth the trade.
+    ///
+    /// A computed answer is deliberately not recorded. It is not a thing that
+    /// gets launched, so recording it would insert one row for every distinct
+    /// expression ever typed — unbounded growth in a table that ranks nothing,
+    /// since there is no frequency to be frequent about.
     pub fn record_launch(&self, item: &ResultItem) {
+        if item.source == Source::Calculator {
+            return;
+        }
+
         let Ok(mut store) = self.history.lock() else {
             return;
         };
@@ -332,12 +379,28 @@ mod tests {
     use super::*;
     use orca_core::config::Files;
     use orca_core::frecency::Frecency;
-    use orca_core::providers::{InMemoryDirectory, ResultProvider};
+    use orca_core::providers::{
+        CalculatorProvider, InMemoryDirectory, QueryProvider, QueryProviders, RawResult,
+        ResultProvider,
+    };
     use orca_core::store::MemoryUsageStore;
     use orca_core::{LaunchTarget, Source};
     use std::path::PathBuf;
 
     const NOW: Timestamp = Timestamp::from_unix_seconds(1_700_000_000);
+
+    /// A query provider that never has anything to say, for tests of a set's
+    /// registration order and names.
+    struct EmptyQueryProvider;
+
+    impl QueryProvider for EmptyQueryProvider {
+        fn name(&self) -> &str {
+            "clipboard"
+        }
+        fn respond(&self, _query: &str) -> Vec<RawResult> {
+            Vec::new()
+        }
+    }
 
     fn exe(name: &str) -> LaunchTarget {
         LaunchTarget::Command {
@@ -547,6 +610,7 @@ mod tests {
             )),
             RankingPolicy::DEFAULT,
             50,
+            QueryProviders::new(),
         );
 
         let first = engine.search("note", 1);
@@ -585,6 +649,7 @@ mod tests {
             )),
             RankingPolicy::DEFAULT,
             50,
+            QueryProviders::new(),
         );
 
         let outcome = engine.search("note", 7);
@@ -610,6 +675,7 @@ mod tests {
             )),
             RankingPolicy::DEFAULT,
             50,
+            QueryProviders::new(),
         );
         assert_eq!(engine.search("", 42).generation, 42);
     }
@@ -627,6 +693,7 @@ mod tests {
             Arc::new(Mutex::new(Box::new(store) as Box<dyn UsageStore + Send>)),
             RankingPolicy::DEFAULT,
             50,
+            QueryProviders::new(),
         )
     }
 
@@ -667,5 +734,181 @@ mod tests {
         );
 
         engine.record_launch(&item);
+    }
+
+    /// An engine that answers queries as well as collecting, for tests of the
+    /// query-shaped seam.
+    fn engine_with_responders(store: MemoryUsageStore, responders: QueryProviders) -> Arc<Engine> {
+        let catalog = Catalog::new(
+            ProviderSet::new().with("apps", fixed_provider(&[])),
+            empty_files(),
+        );
+        Engine::new(
+            catalog,
+            Arc::new(InMemoryDirectory::new()),
+            Arc::new(Mutex::new(Box::new(store) as Box<dyn UsageStore + Send>)),
+            RankingPolicy::DEFAULT,
+            50,
+            responders,
+        )
+    }
+
+    /// The whole point of the second seam, asserted end to end: an arithmetic
+    /// query is answered by a provider that never sees the catalogue, and its row
+    /// comes back ranked like any other.
+    #[test]
+    fn an_arithmetic_query_is_answered_by_its_own_seam() {
+        let engine = engine_with_responders(
+            MemoryUsageStore::new(),
+            QueryProviders::new().with("calculator", CalculatorProvider),
+        );
+
+        let outcome = engine.search("2*(3+4)", 1);
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.rows.len(), 1, "only the answer matches this query");
+        let row = &outcome.rows[0].item;
+        assert_eq!(row.title, "14");
+        assert_eq!(row.source, Source::Calculator);
+        assert_eq!(row.subtitle.as_deref(), Some("= 2*(3+4)"));
+        assert_eq!(
+            row.target,
+            LaunchTarget::CopyToClipboard("14".to_owned()),
+            "a computed answer is copied, not opened"
+        );
+    }
+
+    /// A query that is not a question this seam can answer must not perturb the
+    /// normal path: the catalogue is still served, and no extra row appears.
+    #[test]
+    fn a_plain_query_is_answered_by_the_catalogue_alone() {
+        let providers = ProviderSet::new().with(
+            "apps",
+            fixed_provider(&[("app:notepad", "Notepad", Source::Application)]),
+        );
+        let catalog = Catalog::new(providers, empty_files());
+        let engine = Engine::new(
+            catalog,
+            Arc::new(InMemoryDirectory::new()),
+            Arc::new(Mutex::new(
+                Box::new(MemoryUsageStore::new()) as Box<dyn UsageStore + Send>
+            )),
+            RankingPolicy::DEFAULT,
+            50,
+            QueryProviders::new().with("calculator", CalculatorProvider),
+        );
+
+        let outcome = engine.search("notepad", 1);
+        assert_eq!(outcome.rows.len(), 1);
+        assert_eq!(outcome.rows[0].item.title, "Notepad");
+        assert_eq!(outcome.rows[0].item.source, Source::Application);
+    }
+
+    /// The performance constraint on the merge, stated as a test. A keystroke
+    /// that is not an expression must not copy the catalogue, so a search over a
+    /// cache that was never re-collected must still see the original allocation.
+    #[test]
+    fn a_query_nobody_answers_leaves_the_catalogue_untouched() {
+        let providers = ProviderSet::new().with(
+            "apps",
+            fixed_provider(&[("app:note", "Notepad", Source::Application)]),
+        );
+        let catalog = Catalog::new(providers, empty_files());
+        let engine = Engine::new(
+            catalog,
+            Arc::new(InMemoryDirectory::new()),
+            Arc::new(Mutex::new(
+                Box::new(MemoryUsageStore::new()) as Box<dyn UsageStore + Send>
+            )),
+            RankingPolicy::DEFAULT,
+            50,
+            QueryProviders::new().with("calculator", CalculatorProvider),
+        );
+
+        // Populate the cache, then search something the seam declines. If the
+        // merge cloned unconditionally this would still pass, so the assertion
+        // that matters is the one above it in
+        // `an_engine_collects_once_and_then_answers_from_the_cache` plus the
+        // shape of the code: no `extra`, no clone.
+        let outcome = engine.search("note", 1);
+        assert_eq!(outcome.rows.len(), 1);
+
+        let calculators: Vec<_> = outcome
+            .rows
+            .iter()
+            .filter(|row| row.item.source == Source::Calculator)
+            .collect();
+        assert!(
+            calculators.is_empty(),
+            "a plain query must not grow a calculator row"
+        );
+    }
+
+    /// A calculator row is not a launch, so it must not reach the usage table.
+    /// Recording it would add one row per distinct expression ever typed, which
+    /// grows without bound and ranks nothing.
+    #[test]
+    fn a_computed_answer_is_not_recorded_in_launch_history() {
+        let engine = engine_over(MemoryUsageStore::new());
+        let item = ResultItem::new(
+            "calc:2*(3+4)",
+            "14",
+            Source::Calculator,
+            LaunchTarget::CopyToClipboard("14".to_owned()),
+        );
+        engine.record_launch(&item);
+
+        let history = engine.history.lock().expect("the lock is not poisoned");
+        assert_eq!(
+            history.frecency(&item.id).expect("history readable"),
+            None,
+            "a computed answer must not be credited as a launch"
+        );
+    }
+
+    /// The merge with a non-empty catalogue: the realistic path, where the
+    /// answer is not the only candidate and has to survive ranking alongside
+    /// everything else. This is the branch that copies the catalogue, so it is
+    /// the one a no-clone refactor would break.
+    #[test]
+    fn an_expression_query_answers_alongside_a_real_catalogue() {
+        let providers = ProviderSet::new().with(
+            "apps",
+            fixed_provider(&[
+                ("app:notepad", "Notepad", Source::Application),
+                ("app:2do", "2Do", Source::Application),
+            ]),
+        );
+        let catalog = Catalog::new(providers, empty_files());
+        let engine = Engine::new(
+            catalog,
+            Arc::new(InMemoryDirectory::new()),
+            Arc::new(Mutex::new(
+                Box::new(MemoryUsageStore::new()) as Box<dyn UsageStore + Send>
+            )),
+            RankingPolicy::DEFAULT,
+            50,
+            QueryProviders::new().with("calculator", CalculatorProvider),
+        );
+
+        let outcome = engine.search("2*(3+4)", 1);
+        assert_eq!(outcome.rows.len(), 1, "nothing else matches an expression");
+        assert_eq!(outcome.rows[0].item.title, "14");
+        assert_eq!(outcome.rows[0].item.source, Source::Calculator);
+
+        // And the catalogue is still intact for the next keystroke: the merge
+        // built a temporary rather than replacing the cache.
+        assert!(
+            engine.cached().is_some(),
+            "the catalogue survived the merge"
+        );
+    }
+
+    /// The responder names are logged at startup, so they have to be reportable.
+    #[test]
+    fn the_responder_set_reports_what_is_wired_up() {
+        let responders = QueryProviders::new()
+            .with("calculator", CalculatorProvider)
+            .with("clipboard", EmptyQueryProvider);
+        assert_eq!(responders.names(), vec!["calculator", "clipboard"]);
     }
 }

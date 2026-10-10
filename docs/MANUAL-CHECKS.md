@@ -452,6 +452,54 @@ was moved out of the trait methods into the pure functions in
 all. The thin GPUI adapters left behind are therefore unverified by
 construction, and section 1 and section 4 above are where you check them.
 
+## 6.5 The calculator: a row that is an answer
+
+Section 6 above is about how the ranking *feels*. This is about whether the
+feature works at all, and it is the one that needs a person: the gate proves the
+arithmetic and the wiring compile, and neither of those is a window.
+
+- [ ] Type `2*(3+4)`.
+      **Expected:** one row reading `14`, with `= 2*(3+4)` beneath it when
+      selected, and `Calculator` on the right of the row. Nothing else in the
+      list matches an expression, so the row is alone — if you see other rows,
+      the query-shaped seam is leaking candidates it should have declined.
+
+- [ ] Press <kbd>Enter</kbd>, then paste into Notepad.
+      **Expected:** `14`. This is the whole feature: the popup hides, nothing
+      launches, no browser opens, and the number is on the clipboard. The Win32
+      path in `orca-win/src/clipboard.rs` is statically unverified on purpose —
+      a test that wrote to it would clobber whatever you had just copied — so
+      this paste *is* the check.
+
+- [ ] Copy something recognisable first, then activate a computed result, then
+      paste again.
+      **Expected:** the second paste is the number, not the original text. A
+      clipboard that still carries its previous contents means `EmptyClipboard`
+      was skipped, and a screenshot you copied earlier would still be there too.
+
+- [ ] Try the expressions the unit tests cannot make real for you: `0.1+0.2`
+      (must read `0.3`, not `0.30000000000000004`), `1/3`, `2^10`, `-3^2`,
+      `100/10/2`, and `(1+2)*(3+4)`.
+
+- [ ] Try the ones that must produce **no row at all**: `5`, `3.14`, `notepad`,
+      `2+`, `(1+2`, `1/0`, `5%0`. An empty list is the correct answer, and
+      `inf`, `NaN`, or a blank row is a bug.
+
+- [ ] Type a long expression and delete it with <kbd>Backspace</kbd> one
+      character at a time.
+      **Expected:** the row disappears as soon as the text stops parsing, and
+      nothing lingers. Backspace is a key binding rather than text input — see
+      section 4 — and the query is re-answered on every keystroke.
+
+- [ ] While a calculator row is showing, type one more character that turns it
+      back into plain text.
+      **Expected:** the calculator row goes and the catalogue answers instead.
+
+- [ ] Leave the launcher resident and repeat the whole sequence twenty times.
+      **Expected:** memory plateaus rather than climbing. The clipboard path
+      frees what it allocated on every failure, and a leak there is invisible
+      until the process runs out of handles.
+
 ## Not built yet
 
 So nobody assumes otherwise:

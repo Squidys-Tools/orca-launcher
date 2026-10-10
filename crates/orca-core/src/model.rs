@@ -117,6 +117,21 @@ pub enum LaunchTarget {
         /// Arguments passed on every activation.
         args: Vec<String>,
     },
+    /// Puts a string on the clipboard and opens nothing.
+    ///
+    /// A computed answer is not a thing to *open*. There is no file behind
+    /// `14`, no URI, and no process to start — the only act left that helps is
+    /// putting the number somewhere the user can paste it, which is what this
+    /// target names. Without it a calculator row would have to borrow one of the
+    /// three opening targets and lie about what activating it does:
+    /// `Executable` would launch a program, `Uri` would hand a bare number to a
+    /// browser, and `Command` would drop it onto a shell's command line.
+    ///
+    /// It is also the first target that never leaves the launcher, so activating
+    /// a result can now be a complete no-op as far as the system is concerned.
+    /// The clipboard itself is Win32 and belongs to `orca-win`; this variant
+    /// only records the intent, exactly as the others do.
+    CopyToClipboard(String),
 }
 
 /// One activatable thing in the launcher's result list.

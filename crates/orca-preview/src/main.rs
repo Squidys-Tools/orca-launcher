@@ -29,7 +29,7 @@ use gpui::*;
 use gpui_platform::application;
 use orca_core::config::Files;
 use orca_core::providers::files::InMemoryDirectory;
-use orca_core::providers::{Alias, CommandProvider, ProviderSet};
+use orca_core::providers::{Alias, CommandProvider, ProviderSet, QueryProviders};
 use orca_core::store::{MemoryUsageStore, UsageStore};
 use orca_core::RankingPolicy;
 
@@ -104,5 +104,6 @@ fn preview_engine() -> Arc<Engine> {
         Arc::new(Mutex::new(history)),
         RankingPolicy::default(),
         50,
+        QueryProviders::new(),
     )
 }

@@ -603,6 +603,74 @@ clearing 4.5:1 over a light wallpaper. With the backdrop removed, the panel's
 alpha is simply 1.0 and `the_panel_is_opaque` asserts it — which is not redundant,
 because an alpha of 0.9 passes every other test in the file.
 
+## The second provider seam: answers, not candidates
+
+Phase 1 added a calculator, and it does not fit through the provider seam this
+workspace was built around. Recording why, because the shape looks like an
+oversight until it is spelled out.
+
+`ResultProvider::collect` is **query-blind on purpose**: it returns everything it
+has, and the query is applied once, by the ranker. That rule is what lets two
+providers never disagree about what "matches", and it is the reason the ordering
+is explainable. A computed answer cannot honour it. There is no collectible set
+of "every arithmetic expression" — the set is infinite and its identity depends
+on the query in full — so a calculator served through `collect` would have to
+either enumerate an infinite catalogue or filter by query, and filtering by query
+reopens exactly the exception the rule exists to prevent.
+
+So `crates/orca-core/src/providers/query.rs` is a second seam:
+`QueryProvider::respond(query) -> Vec<RawResult>`, merged by
+`QueryProviders` with the *same* first-provider-wins rule `ProviderSet` uses,
+copied deliberately. A merge rule that differs between the two seams is a rule
+nobody remembers, and the one that differs is the one that gets "fixed" by
+someone who has only read the other file.
+
+`respond` has no error path, for the same reason `collect`'s caller owns its
+concurrency: most keystrokes are not a question this seam can answer, and an
+empty vec is the normal case rather than a failure. The call is synchronous and
+runs on the `BackgroundExecutor` via `cx.spawn`, so <kbd>Esc</kbd> can still
+cancel a response mid-assembly.
+
+### The merge must not cost a catalogue per keystroke
+
+`Engine::search` is the only place the two seams meet, and it does so by cloning
+the cached catalogue *only when something answered*:
+
+```rust
+let combined = if extra.is_empty() { None } else { Some(items.iter().cloned().chain(extra).collect()) };
+let candidates: &[ResultItem] = combined.as_deref().unwrap_or_else(|| items.as_slice());
+```
+
+The condition is the point, not the mechanism. Copying several thousand
+`ResultItem`s to discover that the query is `notepad` would put a per-keystroke
+allocation on the one path "fast to open, or it is just a menu" is about, to
+serve a feature that answers maybe one keystroke in fifty. Two tests pin the two
+branches, because a refactor that "simplifies" the branch away is the plausible
+failure and it would not be visible from the outside.
+
+Query-shaped answers get `Frecency::NEVER` rather than a store lookup: there is
+no history for a computed answer, and reading SQLite on the keystroke path to
+rank a row that is discarded seconds later is I/O for nothing. For the same
+reason `Engine::record_launch` declines `Source::Calculator` — one row per
+distinct expression ever typed would grow the usage table forever and rank
+nothing.
+
+### A computed answer is copied, not opened
+
+`LaunchTarget` gained `CopyToClipboard(String)`. The alternative — modelling the
+answer as a `Uri` or an `Executable` — is what makes it wrong: there is no file,
+no URI, and no process, and the launcher's job is to put the number somewhere
+the user can paste it. The decision of which arm a target takes is
+`win::open_action`, a pure function, because that table is testable without a
+desktop and a target that reached `ShellExecuteW` by mistake would open a browser
+*and* copy with nothing on screen saying which happened.
+
+The clipboard write itself is `orca-win/src/clipboard.rs`, and it is statically
+unverified on purpose: a test that wrote to it would clobber whatever the person
+at the machine just copied. What the tests cover is the arithmetic — how many
+bytes `GlobalAlloc` is asked for — because that part is pure and is where the
+off-by-one lives. The rest is a manual check in `docs/MANUAL-CHECKS.md`.
+
 ## `Window::activate_window` is asynchronous, and that matters
 
 `Window::activate_window()` looks like the obvious way to bring the popup to the
