@@ -52,7 +52,8 @@ use windows::Win32::System::Registry::{
     KEY_READ,
 };
 use windows::Win32::UI::Shell::{
-    FOLDERID_CommonPrograms, FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    FOLDERID_CommonPrograms, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
+    FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
 };
 
 use crate::single_instance::last_error_code;
@@ -336,8 +337,20 @@ impl Drop for ComApartment {
 }
 
 // ---------------------------------------------------------------------------
-// Start Menu
+// Known folders
 // ---------------------------------------------------------------------------
+
+/// The current user's standard folders to search for files.
+///
+/// Known folders account for localization and user redirection such as
+/// OneDrive; folders that are unavailable on this machine are skipped.
+pub fn user_file_search_roots() -> Vec<PathBuf> {
+    [&FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Desktop]
+        .into_iter()
+        .filter_map(|folder| known_folder(folder).ok())
+        .filter(|path| path.is_dir())
+        .collect()
+}
 
 /// The per-user and all-users Start Menu `Programs` folders.
 ///

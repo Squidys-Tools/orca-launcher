@@ -369,6 +369,36 @@ impl Config {
         Config::load_from_str(&text, &path)
     }
 
+    /// Loads config while supplying platform-specific file-search defaults.
+    ///
+    /// When the file has no `[files]` table, `default_files` is used. Within a
+    /// table, omitted `enabled` and `roots` fields inherit those defaults;
+    /// explicit values, including `enabled = false`, are preserved.
+    pub fn load_with_file_defaults(
+        paths: &ConfigPaths,
+        default_files: &Files,
+    ) -> Result<Config, ConfigError> {
+        let path = paths.config_file();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let config = Config {
+                    files: default_files.clone(),
+                    ..Config::default()
+                };
+                config.validate(&path)?;
+                return Ok(config);
+            }
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.clone(),
+                    source,
+                })
+            }
+        };
+        Config::load_from_str_with_file_defaults(&text, &path, default_files)
+    }
+
     /// Parses and validates `text`, labelling errors with `origin`.
     ///
     /// `origin` is a path for a real load and an arbitrary label for a test, so
@@ -381,6 +411,36 @@ impl Config {
             // the offending line. Re-wrapping it would only lose detail.
             detail: error.to_string(),
         })?;
+        config.validate(origin)?;
+        Ok(config)
+    }
+
+    fn load_from_str_with_file_defaults(
+        text: &str,
+        origin: impl AsRef<Path>,
+        default_files: &Files,
+    ) -> Result<Config, ConfigError> {
+        let origin = origin.as_ref();
+        let mut config: Config = toml::from_str(text).map_err(|error| ConfigError::Parse {
+            path: origin.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+        let document: toml::Value = toml::from_str(text).map_err(|error| ConfigError::Parse {
+            path: origin.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+
+        if let Some(files) = document.get("files").and_then(toml::Value::as_table) {
+            if !files.contains_key("enabled") {
+                config.files.enabled = default_files.enabled || files.contains_key("roots");
+            }
+            if !files.contains_key("roots") && config.files.enabled {
+                config.files.roots = default_files.roots.clone();
+            }
+        } else {
+            config.files = default_files.clone();
+        }
+
         config.validate(origin)?;
         Ok(config)
     }
@@ -729,6 +789,14 @@ mod tests {
         Config::load_from_str(text, "test.toml")
     }
 
+    fn platform_file_defaults() -> Files {
+        Files {
+            enabled: true,
+            roots: vec![PathBuf::from("user-documents")],
+            ..Files::default()
+        }
+    }
+
     fn key_of(error: &ConfigError) -> &str {
         match error {
             ConfigError::Invalid { key, .. } => key,
@@ -755,6 +823,69 @@ mod tests {
         assert_eq!(config.general.theme, ThemePreference::System);
         assert_eq!(config.search, Search::default());
         assert_eq!(config.files, Files::default());
+    }
+
+    #[test]
+    fn a_missing_files_table_uses_platform_file_defaults() {
+        let defaults = platform_file_defaults();
+        let config = Config::load_from_str_with_file_defaults(
+            "[general]\nmax_results = 7\n",
+            "test.toml",
+            &defaults,
+        )
+        .expect("should parse");
+        assert_eq!(config.general.max_results, 7);
+        assert_eq!(config.files, defaults);
+    }
+
+    #[test]
+    fn a_missing_config_file_uses_platform_file_defaults() {
+        let paths = ConfigPaths::at(std::env::temp_dir().join(format!(
+            "orca-core-config-default-files-{}",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(paths.config_file());
+        let defaults = platform_file_defaults();
+        let config = Config::load_with_file_defaults(&paths, &defaults)
+            .expect("a missing config file uses defaults");
+        assert_eq!(config.files, defaults);
+    }
+
+    #[test]
+    fn an_explicit_file_search_opt_out_is_preserved() {
+        let config = Config::load_from_str_with_file_defaults(
+            "[files]\nenabled = false\n",
+            "test.toml",
+            &platform_file_defaults(),
+        )
+        .expect("should parse");
+        assert!(!config.files.enabled);
+        assert!(config.files.roots.is_empty());
+    }
+
+    #[test]
+    fn an_enabled_files_table_inherits_missing_roots() {
+        let defaults = platform_file_defaults();
+        let config = Config::load_from_str_with_file_defaults(
+            "[files]\nenabled = true\n",
+            "test.toml",
+            &defaults,
+        )
+        .expect("should parse");
+        assert!(config.files.enabled);
+        assert_eq!(config.files.roots, defaults.roots);
+    }
+
+    #[test]
+    fn roots_without_an_enabled_key_turn_file_search_on() {
+        let config = Config::load_from_str_with_file_defaults(
+            "[files]\nroots = [\"custom-root\"]\n",
+            "test.toml",
+            &platform_file_defaults(),
+        )
+        .expect("should parse");
+        assert!(config.files.enabled);
+        assert_eq!(config.files.roots, [PathBuf::from("custom-root")]);
     }
 
     #[test]

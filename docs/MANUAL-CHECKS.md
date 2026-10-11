@@ -352,6 +352,11 @@ structural property (there is no code path from `render` to the filesystem) but
 Unit-tested and green, but every weight is a product judgement that has never
 been judged by a person looking at a list.
 
+- [ ] With no `[files]` section and a known file in Documents, Downloads, or
+      Desktop, search for its exact name. **Expected:** a `File` result appears.
+- [ ] After the first file search, add or rename a file under that root.
+      **Expected:** it appears after restarting Orca, not before; the catalogue
+      is an in-memory snapshot for the life of the process.
 - [ ] Type the first two letters of an app's name. Does the app come first, above
       files and folders that also match?
 - [ ] Type a word that appears in a *folder* name (`downloads`). Do folders come

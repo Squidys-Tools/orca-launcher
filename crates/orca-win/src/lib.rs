@@ -51,7 +51,8 @@ mod tray;
 mod wide;
 
 pub use apps::{
-    installed_apps, start_menu_apps_in, InstalledApp, InstalledAppSource, ShortcutResolver,
+    installed_apps, start_menu_apps_in, user_file_search_roots, InstalledApp, InstalledAppSource,
+    ShortcutResolver,
 };
 pub use autostart::{
     run_command_for, AutostartError, HkcuRunStore, RunValueStore, Win32Autostart,

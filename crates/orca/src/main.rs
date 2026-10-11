@@ -57,7 +57,7 @@ use async_channel::Sender;
 use gpui::prelude::*;
 use gpui::*;
 
-use orca_core::config::{Config, ConfigPaths};
+use orca_core::config::{Config, ConfigPaths, Files};
 use orca_core::providers::{
     CalculatorProvider, CommandProvider, EnvVarProvider, ProviderSet, QueryProviders,
 };
@@ -142,16 +142,36 @@ fn main() {
 
     // ----------------------------------------------------------------- config
     let paths = ConfigPaths::default();
-    let config = match Config::load(&paths) {
+    let roots = orca_win::user_file_search_roots();
+    let default_files = Files {
+        enabled: !roots.is_empty(),
+        roots,
+        ..Files::default()
+    };
+    let config = match Config::load_with_file_defaults(&paths, &default_files) {
         Ok(config) => config,
         Err(error) => {
             degraded("config.toml, using defaults", &error);
-            Config::default()
+            Config {
+                files: default_files.clone(),
+                ..Config::default()
+            }
         }
     };
     log(&format!(
         "config: hotkey {}, theme {}, {} result rows",
         config.general.hotkey, config.general.theme, config.general.max_results
+    ));
+    log(&format!(
+        "file search: {} ({} roots, depth {}, cap {})",
+        if config.files.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        config.files.roots.len(),
+        config.files.max_depth,
+        config.files.max_results
     ));
 
     // ---------------------------------------------------------------- history
