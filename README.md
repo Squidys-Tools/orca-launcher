@@ -15,7 +15,7 @@ Working today:
   itself, so the drop shadow is not clipped.
 - Global hotkey, tray icon and menu, single-instance guard, autostart.
 - Installed applications, commands and aliases from `config.toml`, environment
-  variables, and file and folder search when `[files]` is enabled.
+  variables, and file and folder search in the user's standard folders by default.
 - Ranking by match tier — prefix, word boundary, substring, fuzzy — weighted by
   launch frequency and recency, with a SQLite usage store behind it.
 
@@ -84,6 +84,26 @@ adds the log file and the "stop the old process" step.
 `tools/gate.ps1` is for checking a change, not for running the app. It asserts the
 GNU toolchain before doing anything, because a wrong toolchain can "pass" while
 checking the wrong target.
+
+### File and folder search
+
+File search works without a config file. Orca searches the current user's
+Documents, Downloads, and Desktop folders, resolved through Windows known-folder
+paths so localization and OneDrive redirection work. To replace those roots or
+turn file search off, add a `[files]` section to `%APPDATA%\Orca\config.toml`:
+
+```toml
+[files]
+enabled = true
+roots = ["D:\\Projects", "C:\\Work"]
+```
+
+Set `enabled = false` to disable file search. The default walk descends six levels
+and collects up to 2,000 entries. Orca collects the catalogue on the first
+search and reuses it for the rest of that process; files added or removed after
+that scan appear after restarting Orca. Concurrent first searches share the
+same collection. An explicit `[files] enabled = false` in an existing config is
+respected; remove the `[files]` section to return to the built-in folders.
 
 `.cargo/config.toml` pins `build.target`, so a bare `cargo run --bin orca` lands
 in the same target directory as the gate. That is deliberate: when the two used
