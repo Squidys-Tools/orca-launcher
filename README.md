@@ -85,6 +85,22 @@ adds the log file and the "stop the old process" step.
 GNU toolchain before doing anything, because a wrong toolchain can "pass" while
 checking the wrong target.
 
+### File and folder search
+
+File search is opt-in. Add a `[files]` section to `%APPDATA%\Orca\config.toml`,
+using a directory that contains the files you want to find:
+
+```toml
+[files]
+enabled = true
+roots = ["C:\\Users\\you\\Documents"]
+```
+
+The default walk descends six levels and collects up to 2,000 entries. Orca
+collects the catalogue on the first search and reuses it for the rest of that
+process; files added or removed after that scan appear after restarting Orca.
+Concurrent first searches share the same collection.
+
 `.cargo/config.toml` pins `build.target`, so a bare `cargo run --bin orca` lands
 in the same target directory as the gate. That is deliberate: when the two used
 different directories, a stale binary was run for hours while fixes appeared to do

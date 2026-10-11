@@ -23,7 +23,9 @@
 //! changes between keystrokes, so it is collected **once per process** and
 //! reused. `docs/ARCHITECTURE.md` is explicit that calling `collect_all` per
 //! keystroke is the mistake to avoid; the [`Engine`] is where that is
-//! structurally prevented rather than merely noted.
+//! structurally prevented rather than merely noted. Changes made after the
+//! first collection become visible after the launcher restarts; there is no
+//! watcher or persistent index.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -659,6 +661,107 @@ mod tests {
         let second = engine.search("note", 2);
         assert_eq!(second.rows.len(), 1);
         assert!(Arc::ptr_eq(&engine.cached().unwrap(), &after_first));
+    }
+
+    #[test]
+    fn concurrent_cold_searches_share_one_collection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::sync::{Barrier, Condvar};
+        use std::thread;
+        use std::time::Duration;
+
+        struct BlockingProvider {
+            collections: Arc<AtomicUsize>,
+            started: mpsc::Sender<()>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl ResultProvider for BlockingProvider {
+            fn name(&self) -> &str {
+                "apps"
+            }
+
+            fn collect(&self) -> Result<Vec<RawResult>, ProviderError> {
+                self.collections.fetch_add(1, Ordering::Relaxed);
+                let _ = self.started.send(());
+                let (released, changed) = &*self.release;
+                let mut released = released.lock().expect("release lock");
+                while !*released {
+                    released = changed.wait(released).expect("release wait");
+                }
+                Ok(vec![RawResult::new(
+                    "app:note",
+                    "Notepad",
+                    Source::Application,
+                    exe("notepad"),
+                )])
+            }
+        }
+
+        const SEARCHES: usize = 4;
+        let collections = Arc::new(AtomicUsize::new(0));
+        let (started, started_rx) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let providers = ProviderSet::new().with(
+            "apps",
+            BlockingProvider {
+                collections: Arc::clone(&collections),
+                started,
+                release: Arc::clone(&release),
+            },
+        );
+        let engine = Arc::new(Engine::new(
+            Catalog::new(providers, empty_files()),
+            Arc::new(InMemoryDirectory::new()),
+            Arc::new(Mutex::new(
+                Box::new(MemoryUsageStore::new()) as Box<dyn UsageStore + Send>
+            )),
+            RankingPolicy::DEFAULT,
+            50,
+            QueryProviders::new(),
+        ));
+        let barrier = Arc::new(Barrier::new(SEARCHES + 1));
+        let (ready, ready_rx) = mpsc::channel();
+
+        let searches = (0..SEARCHES)
+            .map(|generation| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                let ready = ready.clone();
+                thread::spawn(move || {
+                    ready.send(()).expect("test is receiving readiness");
+                    barrier.wait();
+                    engine.search("note", generation as u64)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for _ in 0..SEARCHES {
+            ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("every search reaches the start barrier");
+        }
+        barrier.wait();
+
+        let first_started = started_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        let overlapping_collection =
+            first_started && started_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        let (released, changed) = &*release;
+        *released.lock().expect("release lock") = true;
+        changed.notify_all();
+
+        for search in searches {
+            let outcome = search.join().expect("search thread");
+            assert_eq!(outcome.error, None);
+            assert_eq!(outcome.rows.len(), 1);
+        }
+        assert!(first_started, "the first search must begin collection");
+        assert!(
+            !overlapping_collection,
+            "another cold search started a second collection"
+        );
+        assert_eq!(collections.load(Ordering::Relaxed), 1);
     }
 
     #[test]
