@@ -91,10 +91,9 @@ actions!(
         DeleteForward,
         /// Exit the process, hiding the popup first.
         ///
-        /// The tray menu is the intended way to quit, but it is currently broken
-        /// (`LoadImageW` on the stock app icon fails), and a resident launcher
-        /// with no way to exit is worse than one extra keybinding. Bound to
-        /// <kbd>Ctrl</kbd>+<kbd>Esc</kbd> so it cannot collide with typing.
+        /// The tray entry is the intended exit path; its end-to-end behavior
+        /// still needs a Windows check. Keep the existing keyboard escape hatch
+        /// so a resident launcher remains closable if tray setup fails.
         Quit,
     ]
 );
@@ -130,18 +129,18 @@ pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT + FRAME_MARGIN * 2.0;
 /// Painted rather than delegated to DWM; see the module docs. Large enough to
 /// read as a floating card and small enough that the footer pills inside it do
 /// not look like they are competing with it.
-const PANEL_RADIUS: f32 = 16.0;
+const PANEL_RADIUS: f32 = 18.0;
 
 /// One row of the result list.
-const ROW_HEIGHT: f32 = 38.0;
+const ROW_HEIGHT: f32 = 40.0;
 /// The search field's height. Taller than a row so the query reads as the
 /// panel's subject rather than as another list item.
-const SEARCH_HEIGHT: f32 = 60.0;
+const SEARCH_HEIGHT: f32 = 64.0;
 /// The status bar's height.
 const STATUS_HEIGHT: f32 = 44.0;
 /// Height of a footer pill, and of the keycap inside it.
-const PILL_HEIGHT: f32 = 30.0;
-const KEYCAP_HEIGHT: f32 = 20.0;
+const PILL_HEIGHT: f32 = 32.0;
+const KEYCAP_HEIGHT: f32 = 22.0;
 
 /// The placeholder shown when the query is empty.
 const PLACEHOLDER: &str = "Search for apps and commands…";
@@ -1007,16 +1006,16 @@ impl LauncherView {
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_4()
             .flex_shrink_0()
-            .px_5()
+            .px_6()
             .h(px(SEARCH_HEIGHT))
-            .text_size(px(16.))
+            .text_size(px(18.))
             .track_focus(focus)
             .child(
                 svg()
                     .data(MAGNIFIER.as_bytes())
-                    .size(px(18.))
+                    .size(px(20.))
                     .flex_shrink_0()
                     .text_color(theme.dim),
             )
@@ -1040,7 +1039,7 @@ impl LauncherView {
             .gap_2()
             .h(px(PILL_HEIGHT))
             .px_3()
-            .rounded(px(8.))
+            .rounded(px(9.))
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border)
@@ -1057,9 +1056,9 @@ impl LauncherView {
                     .justify_center()
                     .h(px(KEYCAP_HEIGHT))
                     .px_2()
-                    .rounded(px(5.))
+                    .rounded(px(6.))
                     .bg(theme.selection)
-                    .text_size(px(10.))
+                    .text_size(px(11.))
                     .text_color(theme.dim)
                     .child(SharedString::from(key)),
             )
@@ -1091,7 +1090,7 @@ impl LauncherView {
             .justify_between()
             .gap_4()
             .flex_shrink_0()
-            .px_4()
+            .px_5()
             .h(px(STATUS_HEIGHT))
             .border_t_1()
             .border_color(theme.border)
@@ -1100,8 +1099,8 @@ impl LauncherView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
-                    .text_size(px(11.))
+                    .gap_4()
+                    .text_size(px(12.))
                     .text_color(if error { theme.accent } else { theme.dim })
                     .child(SharedString::from(left))
                     .child(SharedString::from(latency)),
@@ -1142,7 +1141,7 @@ impl LauncherView {
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
-            .px_2()
+            .px_3()
             .py_2();
 
         if rows.is_empty() {
@@ -1175,10 +1174,10 @@ impl LauncherView {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_3()
-                .px_3()
+                .gap_4()
+                .px_4()
                 .h(px(ROW_HEIGHT))
-                .rounded(px(9.))
+                .rounded(px(10.))
                 .when(is_selected, |style| style.bg(theme.selection))
                 .child(
                     div()
@@ -1188,7 +1187,7 @@ impl LauncherView {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(15.))
+                                .text_size(px(16.))
                                 .text_color(if is_selected {
                                     theme.on_selection
                                 } else {
@@ -1214,7 +1213,7 @@ impl LauncherView {
                                 column.child(
                                     div()
                                         .truncate()
-                                        .text_size(px(11.))
+                                        .text_size(px(12.))
                                         .text_color(theme.dim)
                                         .child(subtitle),
                                 )
