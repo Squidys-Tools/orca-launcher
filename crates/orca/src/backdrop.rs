@@ -123,7 +123,7 @@ fn panel_rect(window_bounds: Bounds<Pixels>, scale_factor: f32) -> (i32, i32, i3
     // A monitor reporting a nonsensical scale must not collapse the capture to
     // nothing: that is a hole in the middle of the panel, and a flat fill is
     // strictly better.
-    let scale = if scale_factor > 0.0 {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
         scale_factor
     } else {
         1.0
@@ -192,6 +192,22 @@ mod tests {
     }
 
     #[test]
+    fn capture_offsets_remain_correct_on_monitors_above_and_left() {
+        let predicted = panel_rect(window_at(-800., -200.), 1.5);
+        let hidden = panel_rect_in_window((-1200, -300, 1086, 741));
+        assert_eq!(predicted, (-1152, -252, 990, 645));
+        assert_eq!(
+            hidden,
+            Some((
+                predicted.0,
+                predicted.1,
+                predicted.2 as u32,
+                predicted.3 as u32
+            ))
+        );
+    }
+
+    #[test]
     fn a_too_small_window_is_not_captured() {
         assert_eq!(panel_rect_in_window((0, 0, 0, 741)), None);
     }
@@ -217,10 +233,14 @@ mod tests {
     }
 
     #[test]
-    fn a_nonsensical_scale_still_produces_a_capture_rather_than_a_hole() {
-        // A monitor reporting scale 0 would divide the panel to nothing, and the
-        // panel would have a hole in it rather than a flat fill.
-        let (_, _, w, h) = panel_rect(window_at(0., 0.), 0.0);
-        assert!(w >= 1 && h >= 1, "got {w}x{h}");
+    fn a_nonsensical_scale_uses_a_safe_fallback() {
+        let expected = panel_rect(window_at(0., 0.), 1.0);
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                panel_rect(window_at(0., 0.), scale),
+                expected,
+                "scale {scale}"
+            );
+        }
     }
 }

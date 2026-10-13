@@ -72,6 +72,10 @@ jobs:
           const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'))
           packageJson.napi.targets = ['x86_64-pc-windows-gnu']
           fs.writeFileSync('package.json', `${JSON.stringify(packageJson, null, 2)}\n`)
+          const manifest = fs.readFileSync('Cargo.toml', 'utf8')
+          if (!/^\[workspace\]$/m.test(manifest)) {
+            fs.appendFileSync('Cargo.toml', '\n[workspace]\n')
+          }
           NODE
 
       - name: Build the release addon
