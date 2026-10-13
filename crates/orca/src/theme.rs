@@ -14,24 +14,14 @@
 //!
 //! # What "contrast" is measured against
 //!
-//! The panel is **opaque**, so its own RGB is the colour the user sees and a
-//! contrast check needs no help. What is *not* opaque is everything painted on
-//! top of it: the selection fill, the footer pills, the border. Those are
-//! alpha-blended over the panel, and a `15%`-white selection over a near-black
-//! panel is a slightly lighter near-black — which is what makes a highlighted
-//! row readable, and is also why checking the selection's raw RGB against the
-//! text would score a number about nothing.
+//! The panel is translucent over a blurred desktop capture, so contrast tests
+//! composite the panel and its child fills against both black and white. Those
+//! are the conservative extremes for the unknown pixels behind the launcher.
+//! The selection is composited over the panel before measuring text, because
+//! it does not replace the panel with its own RGB.
 //!
-//! So the tests composite: they carry their own source-over, which is the same
-//! maths the renderer's blend state does, and every contrast assertion is made
-//! against the fill composited onto the panel.
-//!
-//! This was not always true. The panel used to be a translucent fill over a
-//! captured and blurred desktop, and the checks then had to composite the panel
-//! itself over two extreme backdrops — a white and a black wallpaper — because
-//! the desktop behind the launcher was not under our control. The capture is
-//! gone for now (`docs/ARCHITECTURE.md`); if it comes back, those two backdrops
-//! come back with it.
+//! The tests use the same source-over math as the renderer's blend state, then
+//! measure the lowest contrast over the two extreme backdrops.
 
 use gpui::{hsla, px, BoxShadow, Rgba};
 use orca_core::config::ThemePreference;
@@ -64,11 +54,10 @@ const fn rgba_alpha(hex: u32, alpha: f32) -> Rgba {
 
 /// A resolved palette.
 ///
-/// `background` is opaque: it is the panel, and it is the surface every other
-/// entry is composited onto. The three fills are translucent because they are
-/// painted over the panel rather than replacing it — a selection is a
-/// *lightening* of the panel, not a colour of its own. The text colours are
-/// opaque because a translucent glyph is one more rounding away from invisible.
+/// `background` tints the captured desktop. The three other fills are
+/// translucent because they layer over that panel — a selection is a
+/// *lightening* of the panel, not a colour of its own. Text stays opaque so it
+/// remains readable over both theme variants.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     /// The panel fill.
@@ -93,7 +82,7 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba(0x101014),
+        background: rgba_alpha(0x101014, 0.88),
         surface: rgba_alpha(0xffffff, 0.08),
         border: rgba_alpha(0xffffff, 0.12),
         selection: rgba_alpha(0xffffff, 0.15),
@@ -105,7 +94,7 @@ impl Theme {
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba(0xf4f4f7),
+        background: rgba_alpha(0xf4f4f7, 0.90),
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
@@ -230,16 +219,26 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    /// The two backdrops a translucent panel can land on that matter most: a
+    /// pure white wallpaper and a pure black one.
+    const BACKDROPS: [(&str, Rgba); 2] = [("white", rgba(0xffffff)), ("black", rgba(0x000000))];
+
     /// The lowest contrast `foreground` reaches against the surface it is
-    /// actually drawn on.
+    /// actually drawn on, over either extreme backdrop.
     ///
     /// `fill` is composited *on top of* the panel. The panel cannot be skipped:
     /// a selection highlight does not sit on the desktop, it sits on the panel,
     /// and a 15%-white highlight over a near-black panel is dark enough for white
     /// text to clear 4.5:1 on. Compositing it against anything else scores a
     /// number about nothing.
-    fn drawn_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
-        contrast(foreground, composite_over(fill, theme.background))
+    fn worst_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
+        BACKDROPS
+            .iter()
+            .map(|(_, backdrop)| {
+                let panel = composite_over(theme.background, *backdrop);
+                contrast(foreground, composite_over(fill, panel))
+            })
+            .fold(f32::INFINITY, f32::min)
     }
 
     #[test]
@@ -268,8 +267,8 @@ mod tests {
         // property of a palette that a human should never have to check, and it
         // is the property that regresses silently when someone tunes a hex.
         //
-        // Checked against the composited fill, which for the panel is itself and
-        // for a selection is that fill over the panel.
+        // The desktop behind the translucent panel is not ours, so test both
+        // extreme backdrops and include the panel under every child fill.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             for (role, foreground, fill) in [
                 ("text on panel", theme.text, theme.background),
@@ -278,27 +277,27 @@ mod tests {
                 ("text on selection", theme.on_selection, theme.selection),
                 ("dim on selection", theme.dim, theme.selection),
             ] {
-                let ratio = drawn_contrast(theme, foreground, fill);
+                let ratio = worst_contrast(theme, foreground, fill);
                 assert!(
                     ratio >= 4.5,
-                    "{name}: {role} is only {ratio:.2}:1 on the surface it is drawn \
-                     on, below the 4.5:1 floor"
+                    "{name}: {role} is only {ratio:.2}:1 over the worst backdrop, \
+                     below the 4.5:1 floor"
                 );
             }
         }
     }
 
     #[test]
-    fn the_panel_is_opaque() {
-        // The window around the panel is transparent, so an alpha below 1.0 on
-        // the panel fill means the desktop shows through the card itself —
-        // legible text behind the launcher's own text. Asserted because an
-        // alpha here is invisible in every other test: dropping it to 0.9 would
-        // pass all of them.
+    fn the_panel_is_translucent_but_keeps_a_readable_tint() {
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
-            assert_eq!(
-                theme.background.a, 1.0,
-                "{name}: the panel fill must be opaque, not alpha {}",
+            assert!(
+                theme.background.a < 0.95,
+                "{name}: panel tint is opaque (alpha {})",
+                theme.background.a
+            );
+            assert!(
+                theme.background.a > 0.5,
+                "{name}: panel tint is too transparent (alpha {})",
                 theme.background.a
             );
         }

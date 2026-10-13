@@ -17,14 +17,14 @@
 //!   alternative — `DWMWA_WINDOW_CORNER_PREFERENCE` — is Windows 11 only, has
 //!   no radius worth having, and would round the outside of the shadow. See
 //!   `win.rs`.
-//! * Because the window is transparent, the panel's fill is the only opaque
-//!   thing in it, and every colour inside it is composited against that fill
-//!   rather than against the desktop. See [`crate::theme`].
+//! * Because the window is transparent, the panel layers a blurred capture
+//!   under its translucent tint. Every colour inside it is composited over that
+//!   tint rather than directly against the desktop. See [`crate::theme`].
 //!
-//! The panel is **opaque**, not frosted. It used to capture the desktop behind
-//! itself, blur it, and paint it under a translucent fill; that is gone until
-//! the feature work is further along, and `docs/ARCHITECTURE.md` records what
-//! was removed and what restoring it costs.
+//! The panel paints a blurred capture of the desktop taken while the window is
+//! hidden, then tints it with the current theme. Capture and blur happen away
+//! from the show path; `docs/ARCHITECTURE.md` records why the sample is slightly
+//! stale and why that is preferable to delaying the launcher.
 //!
 //! Everything in this file that looks like GPUI folklore is load-bearing, and
 //! each of the four items below cost a debugging cycle to find. They are
@@ -260,6 +260,13 @@ pub struct Launcher {
     /// What `theme_preference` resolved to last frame.
     pub theme: Theme,
 
+    /// The latest blurred desktop capture, prepared while the window is hidden.
+    pub backdrop: Option<Arc<RenderImage>>,
+    /// Invalidates older background captures that finish after a newer request.
+    pub backdrop_generation: u64,
+    /// Requests a fresh sample after either the hotkey or Escape hides the window.
+    pub on_hidden: Option<Arc<dyn Fn() + Send + Sync>>,
+
     /// Shared with the background threads.
     pub engine: Arc<Engine>,
     /// Shared with the frame that measures the popup's latency.
@@ -318,6 +325,9 @@ impl Launcher {
             last_bounds: None,
             theme_preference,
             theme: resolved,
+            backdrop: None,
+            backdrop_generation: 0,
+            on_hidden: None,
             engine,
             telemetry,
         }
@@ -437,6 +447,9 @@ impl Launcher {
         self.reset();
         if let Some(hwnd) = self.hwnd {
             crate::win::set_shown(hwnd, false);
+        }
+        if let Some(on_hidden) = &self.on_hidden {
+            on_hidden();
         }
         plan
     }
@@ -964,6 +977,7 @@ impl Render for LauncherView {
         let focus = self.launcher.read(cx).focus.clone();
         let entity = self.launcher.clone();
         let telemetry = self.launcher.read(cx).telemetry.clone();
+        let backdrop = self.launcher.read(cx).backdrop.clone();
 
         // The root is deliberately *not* painted. It is the shadow margin, and
         // the window behind it is transparent — see the module docs. Giving it
@@ -998,8 +1012,20 @@ impl Render for LauncherView {
                     .border_color(theme.border)
                     .shadow(theme.panel_shadows())
                     // Clips the rows to the panel's radius. Without it the scrolled
-                    // list paints square corners over the rounded ones.
+                    // list and captured desktop paint square corners over the
+                    // rounded ones.
                     .overflow_hidden()
+                    .when_some(backdrop, |panel, image| {
+                        panel
+                            .child(
+                                div().absolute().inset_0().child(
+                                    img(ImageSource::Render(image))
+                                        .object_fit(ObjectFit::Fill)
+                                        .size_full(),
+                                ),
+                            )
+                            .child(div().absolute().inset_0().bg(theme.background))
+                    })
                     .child(self.search_field(theme, &focus, entity, telemetry))
                     .when(!query_empty, |panel| {
                         panel

@@ -467,76 +467,55 @@ build cannot quietly reintroduce the clipped-shadow failure. It logs whether
 Windows accepted it, because that number is the only thing in the log that says
 which path the corners are taking.
 
-### The frosted backdrop is gone for now, and why
+### The frosted backdrop: capture while hidden, blur off the show path
 
-**Removed 2026-10-03.** The panel was translucent and painted a blurred copy of
-the desktop behind itself. It is now an opaque card. The feature was cut while
-the launcher still has almost no features in it, on the grounds that the capture
-was the single most expensive thing on the keystroke path and the cheapest thing
-to get wrong. It is deferred, not abandoned: everything below is the reason it
-was not free, and it is the list to read before putting it back.
+**Restored 2026-10-12 after comparing native and open-source alternatives.**
+The panel is translucent over a blurred screen capture again. The capture and
+blur run on `BackgroundExecutor`: once before a popup exists, then after each
+hide. The visible show path only reuses the last image, so the 20–50ms capture
+cost previously measured on that path no longer delays the hotkey. The tradeoff
+is deliberate staleness: the image represents the desktop at startup or hide
+time, not the instant the popup opens.
 
-The three modules are deleted — `orca_win::backdrop`, `orca_core::backdrop`,
-`orca::backdrop` — along with `image` as a direct dependency and the
-`Win32_Graphics_Gdi` feature on `orca-win`. `win::cursor_physical_and_scale`
-went with them; it existed only so the capture and the panel placement could not
-disagree about the cursor's monitor.
+**Why not a native Windows backdrop or a drop-in crate.** The official DWM
+`DwmEnableBlurBehindWindow` call has no blur effect on Windows 8 and later. The
+newer `DWMWA_SYSTEMBACKDROP_TYPE` material paints at the window level, while this
+window includes a transparent shadow margin around a smaller rounded panel; a
+window-wide material would fill that margin. It also requires Windows 11 22H2
+(build 22621). More importantly, another GPUI application reproduced the same
+backend limitation: DWM Acrylic attributes succeed but do not blur the
+DirectComposition-rendered client area; GPUI needs a backdrop-brush hook in its
+composition tree ([con-terminal#55](https://github.com/nowledge-co/con-terminal/issues/55)).
 
-**Why we could not use a system backdrop material.** `gpui` exposes
-`WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop,
-MicaAltBackdrop}` and `gpui_windows` implements all four through DWM. None of
-them fits, for a specific reason rather than a cautious one: they apply their
-material to the **whole window rectangle**. The window is larger than the panel,
-so a backdrop material would fill the shadow margin too and turn the rounded
-panel into a rounded *square* — worse than no material at all.
+The open-source [`backdrop-blur`](https://github.com/abdu-benayad/backdrop-blur)
+crate provides GPU blur passes for renderers that expose a sampleable scene
+texture, but its own design excludes GPUI until it adds that render hook. A
+renderer-level implementation would mean changing or forking the pinned GPUI
+backend, not adding a dependency. Whole-window helpers such as
+[`window-vibrancy`](https://github.com/tauri-apps/window-vibrancy) do not solve
+the rounded panel/shadow-margin mismatch and document Windows version/performance
+limitations. Those are larger and less reliable changes than this feature needs.
 
-**And the second obstacle, found by reading the backend rather than the docs.**
-`MicaBackdrop` goes through `DwmSetWindowAttribute`, and `gpui_windows` sets
-`WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
-default, off only when `DISABLE_DIRECT_COMPOSITION` is set. DWM backdrops are
-applied to windows DWM redirects, and a DirectComposition window is not
-redirected, so the attribute may do nothing visible at all. The documentation's
-"not always supported" is doing a lot of quiet work there.
+The retained-window capture has two pieces: `orca_win::capture_screen_region`
+uses GDI `BitBlt` while the window is hidden, and the pure
+`orca_core::backdrop::soften` downsamples BGRA by four, box-blurs the reduced
+buffer, and lets the renderer bilinearly upscale it. The renderer-owned desktop
+is never sampled; GDI gives us the exact panel rectangle without consent UI, and
+the pure blur remains fully testable. A later hide capture uses the HWND's
+measured physical rectangle, so moving the pointer to another monitor does not
+move the sampled region. The initial sample uses the cursor monitor before any
+window exists.
 
-**What the capture cost.** GDI `BitBlt` off the screen DC, not
-`Windows.Graphics.Capture`: the modern API shows a consent dialog and returns a
-D3D frame pool to copy out of, which for blurring a few hundred thousand pixels
-per hotkey press is the wrong trade. Even so it measured 20–50ms, and it had to
-run while the window was hidden — `BitBlt` photographs the screen, so capturing
-with the popup up captures the popup. That precondition is what made the design
-awkward rather than cheap: the work had to be moved to the hide path and the
-startup path so the show path could stay instant, which in turn made the blur
-*stale* — showing what was behind the cursor at close, not at open. A launcher
-that opens 40ms late is worse than one whose frosted panel is a frame old.
+Two old failure modes remain guarded because they are easy to reintroduce:
 
-**The blur was a downsample, not a Gaussian.** `soften` box-averaged by 4,
-blurred the small buffer, and let the renderer's bilinear filter stretch it back.
-The bilinear upscale is just the last box in a separable chain, so it reads like
-a wide Gaussian and costs about 16× less, because the expensive step runs on
-1/16th of the pixels. `DOWNSAMPLE = 4` was a balance with both failure
-directions visible: too large and the upscale shows as faint diagonal banding,
-too small and it stops being cheap and reappears as keystroke latency.
+* Edge samples are divided by the number of pixels actually covered, so the
+  right and bottom borders do not fade into a dark band.
+* GDI handles remember their origin and are released with the matching API;
+  selected bitmaps are restored before their memory DC is deleted.
 
-**Two bugs in that code, named because they are the ones that would come back
-with it:**
-
-* **Alpha was normalised by the window width instead of the number of samples
-  actually taken.** At an edge the window runs off the image, so every border
-  lost opacity and the loss compounded through each pass. The visible symptom is
-  a flat image coming out with translucent edges — a dark band down the right and
-  bottom of the panel, which reads as "the shadow is wrong".
-* **A GDI handle leak waiting to happen.** A memory DC with a bitmap still
-  selected into it cannot be deleted without leaking the bitmap, and a screen DC
-  must be released with `ReleaseDC` while a memory DC is destroyed with
-  `DeleteDC`. There is no reliable query for which kind you have, so the guard
-  recorded it at creation. Getting this backwards leaks a handle on every hotkey
-  press.
-
-**What to do when it comes back.** Keep the capture off the show path — the
-blur is the cheap part of this feature and the latency is not. Do not
-reintroduce `Win32_Graphics_Gdi` on `orca-win` for it: `orca` calls
-`MonitorFromPoint` and now declares that feature itself, because a feature
-another crate in the graph happens to enable is not a dependency.
+The panel tint is translucent over the image, and the theme tests measure text
+contrast over both black and white backdrops. If a capture fails, the themed
+fill remains non-fatal and the launcher still opens.
 
 ### The window frame: `Transparent` asks Windows for a border
 
@@ -578,30 +557,20 @@ until a human looks at a screenshot. Anything that reads as a window
 *decoration* — border, shadow, corner — is DWM's business, not the renderer's,
 and has to be checked separately from anything that reads as pixel content.
 
-### The panel is opaque, and the fills on top of it are not
+### The panel tint, and the fills on top of it
 
-The panel fill itself is opaque — it is a card sitting over the desktop, and
-anything with an alpha there would put the desktop's own text behind the
-launcher's text. So a contrast check against the panel's RGB needs no help.
+The panel fill is translucent over the captured desktop, so `theme.rs`'s
+contrast tests composite it over both black and white before measuring text.
+Those two extremes bound the unknown pixels behind the launcher, and the tests
+also enforce an alpha range: too opaque and the frosted backdrop disappears, too
+transparent and `dim` stops clearing 4.5:1 over a light wallpaper.
 
-Everything painted *inside* the panel is a different matter. The selection fill,
-the footer pills and the border are alpha-blended over the panel rather than
-replacing it: a selection is a lightening of the card it sits on, not a colour of
-its own. So `theme.rs`'s tests still carry their own source-over, and assert every
-pairing against the fill composited onto the panel.
-
-The subtlety that cost a test, and that is worth keeping for when the frosted
-backdrop comes back: a selection highlight does not sit on the desktop, it sits on
-the panel. Compositing a 10%-white highlight directly against a white wallpaper
-scores it at 1.00:1 and produces a failing test that describes nothing the user
-would ever see. It is the strongest argument in this file for testing against the
-real compositing chain rather than against the constants that feed it.
-
-While the panel *was* translucent, that same test also bounded its alpha from both
-sides: too opaque and the translucency was gone, too transparent and `dim` stopped
-clearing 4.5:1 over a light wallpaper. With the backdrop removed, the panel's
-alpha is simply 1.0 and `the_panel_is_opaque` asserts it — which is not redundant,
-because an alpha of 0.9 passes every other test in the file.
+Everything painted *inside* the panel is layered over that tint rather than
+replacing it. The selection fill, footer pills and border are alpha-blended, so
+the tests composite each fill over the tinted panel and then over both backdrops.
+A selection highlight does not sit directly on the desktop: testing it against
+the real compositing chain avoids scoring the fill against a surface the user
+never sees.
 
 ## The second provider seam: answers, not candidates
 
@@ -966,4 +935,3 @@ store, and `criterion` as a dev-dependency for the ranking benchmarks. The
 `bundled` feature is a deliberate trade: the SQLite amalgamation compiles into
 the binary, so a user's launcher works on a machine where nothing has been
 installed, at the cost of a slower first build.
-

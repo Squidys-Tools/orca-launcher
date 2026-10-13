@@ -42,6 +42,7 @@
 //! development. What keeps the process meaningful with zero windows open is the
 //! hotkey thread and the tray icon.
 
+mod backdrop;
 mod catalog;
 mod launch;
 mod providers;
@@ -95,6 +96,13 @@ enum UiCommand {
     Show,
     /// The tray's Quit entry was chosen.
     Quit,
+    /// A popup hide completed; refresh its desktop sample while it is hidden.
+    RefreshBackdrop,
+}
+
+enum BackdropTarget {
+    PredictedWindow(Bounds<Pixels>, f32),
+    HiddenWindow((i32, i32, u32, u32)),
 }
 
 /// Writes a line to stdout *and* flushes it.
@@ -190,6 +198,7 @@ fn main() {
     install_tray(&commands);
 
     // A second launch, arriving from anywhere, raises this one.
+    let ui_commands = commands.clone();
     if let Err(error) = instance.start_listener(Box::new(move |command| match command {
         InstanceCommand::Show => {
             let _ = commands.send_blocking(UiCommand::Show);
@@ -201,7 +210,7 @@ fn main() {
     // let the next launch become a second primary.
     std::mem::forget(instance);
 
-    run_gpui(config, engine, receiver);
+    run_gpui(config, engine, receiver, ui_commands);
 }
 
 /// Opens the launch-history store, falling back to an in-memory one.
@@ -349,7 +358,12 @@ fn install_tray(commands: &Sender<UiCommand>) {
 }
 
 /// Starts the GPUI application and pumps [`UiCommand`]s into it.
-fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiver<UiCommand>) {
+fn run_gpui(
+    config: Config,
+    engine: Arc<Engine>,
+    receiver: async_channel::Receiver<UiCommand>,
+    commands: Sender<UiCommand>,
+) {
     // MANDATORY. `QuitMode::Default` resolves to `LastWindowClosed` on Windows,
     // so closing the popup would tear down the process. This failed twice
     // during the probe's development before it was pinned here.
@@ -358,9 +372,13 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
         let telemetry = Arc::new(Telemetry::default());
         let theme_preference = config.general.theme;
         let engine = Arc::clone(&engine);
+        let hide_sender = commands.clone();
         let launcher = cx.new(|cx: &mut Context<Launcher>| {
             let mut launcher = Launcher::new(cx, Arc::clone(&engine), Arc::clone(&telemetry));
             launcher.theme_preference = theme_preference;
+            launcher.on_hidden = Some(Arc::new(move || {
+                let _ = hide_sender.send_blocking(UiCommand::RefreshBackdrop);
+            }));
             launcher
         });
 
@@ -388,10 +406,22 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
         let pump_launcher = launcher.clone();
         let pump_telemetry = Arc::clone(&telemetry);
         cx.spawn(async move |cx| {
+            let warm = cx.update(|app| {
+                let (display, _) = win::display_under_cursor(app);
+                compact_bounds(display, app)
+            });
+            let scale = win::cursor_physical_and_scale().map_or(1.0, |(_, scale)| scale);
+            prewarm_backdrop(
+                &pump_launcher,
+                BackdropTarget::PredictedWindow(warm, scale),
+                cx,
+            );
+
             while let Ok(command) = pump_rx.recv().await {
                 match command {
                     UiCommand::Toggle => toggle(&pump_launcher, &pump_telemetry, cx),
                     UiCommand::Show => show(&pump_launcher, &pump_telemetry, cx),
+                    UiCommand::RefreshBackdrop => refresh_hidden_backdrop(&pump_launcher, cx),
                     UiCommand::Quit => {
                         cx.update(|cx| cx.quit());
                         return;
@@ -451,9 +481,8 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         // construction. Repositioned and collapsed first, because a monitor may
         // have been unplugged while the popup was hidden.
         //
-        // Nothing here touches the frame's contents. The panel is an opaque
-        // fill painted from the palette, so a show is reposition, paint,
-        // activate and nothing else.
+        // The capture was prepared while the window was hidden, so showing is
+        // reposition, paint, activate and nothing else.
         let shown = cx.update(|app| {
             let outcome = window.update(app, |_, window, cx| {
                 place_on_cursor(window, cx);
@@ -632,8 +661,6 @@ fn hide(launcher: &Entity<Launcher>, cx: &mut AsyncApp) {
     let action = cx.update(|app| launcher.update(app, |launcher, _| launcher.hide()));
 
     match action {
-        // Both arms below end with the window hidden. Which one ran matters
-        // only because `DestroyWindow` leaves nothing to show next time.
         HideAction::Retained => log("popup: hidden (window retained)"),
         HideAction::NothingShown => log("popup: hide requested while nothing was shown"),
         HideAction::DestroyWindow => {
@@ -701,6 +728,64 @@ fn spawn_command_pump(
         })
         .map_err(|error| degraded("command pump thread", error))
         .ok();
+}
+
+fn prewarm_backdrop(launcher: &Entity<Launcher>, target: BackdropTarget, cx: &mut AsyncApp) {
+    let generation = cx.update(|app| {
+        launcher.update(app, |launcher, _| {
+            launcher.backdrop_generation = launcher.backdrop_generation.wrapping_add(1);
+            launcher.backdrop_generation
+        })
+    });
+    let target_name = match &target {
+        BackdropTarget::PredictedWindow(_, _) => "startup region",
+        BackdropTarget::HiddenWindow(_) => "hidden window region",
+    };
+    let capture = cx.background_executor().spawn(async move {
+        match target {
+            BackdropTarget::PredictedWindow(bounds, scale) => {
+                crate::backdrop::capture(bounds, scale)
+            }
+            BackdropTarget::HiddenWindow(rect) => crate::backdrop::capture_hidden_window(rect),
+        }
+    });
+    let launcher = launcher.clone();
+    cx.spawn(async move |cx| {
+        let backdrop = capture.await;
+        log(&format!(
+            "backdrop: {} in {:.1} ms from {target_name}",
+            if backdrop.image.is_some() {
+                "captured and blurred"
+            } else {
+                "unavailable, using the tinted panel fallback"
+            },
+            backdrop.took_ms,
+        ));
+        cx.update(|app| {
+            launcher.update(app, |launcher, cx| {
+                if launcher.backdrop_generation == generation {
+                    launcher.backdrop = backdrop.image;
+                    cx.notify();
+                }
+            })
+        });
+    })
+    .detach();
+}
+
+fn refresh_hidden_backdrop(launcher: &Entity<Launcher>, cx: &mut AsyncApp) {
+    let rect = cx.update(|app| {
+        launcher.read(app).hwnd.and_then(|hwnd| {
+            (!win::is_visible(hwnd))
+                .then(|| win::physical_window_rect(hwnd))
+                .flatten()
+        })
+    });
+    if let Some(rect) = rect {
+        prewarm_backdrop(launcher, BackdropTarget::HiddenWindow(rect), cx);
+    } else {
+        log("backdrop: hidden window bounds unavailable; keeping the previous image");
+    }
 }
 
 /// Moves and collapses the popup to its fixed vertical anchor on the cursor's monitor.

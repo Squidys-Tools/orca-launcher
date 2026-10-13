@@ -400,6 +400,16 @@ pub fn is_visible(hwnd: HWND) -> bool {
     unsafe { IsWindowVisible(hwnd).as_bool() }
 }
 
+/// The window's physical screen rectangle, suitable for a hidden-screen capture.
+pub(crate) fn physical_window_rect(hwnd: HWND) -> Option<(i32, i32, u32, u32)> {
+    let mut rect = RECT::default();
+    // SAFETY: `hwnd` is owned by this process and `rect` is writable storage.
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    let width = u32::try_from(rect.right - rect.left).ok()?;
+    let height = u32::try_from(rect.bottom - rect.top).ok()?;
+    (width > 0 && height > 0).then_some((rect.left, rect.top, width, height))
+}
+
 /// A one-line, human-readable summary of a window's real state.
 ///
 /// This exists because "the launcher did not open" is an ambiguous report: the
@@ -500,6 +510,12 @@ fn primary_scale_factor() -> f32 {
     monitor_scale_factors(monitor)
         .map(|(scale_x, _)| scale_x)
         .unwrap_or(1.0)
+}
+
+/// The cursor's physical position and its monitor's scale factor.
+pub(crate) fn cursor_physical_and_scale() -> Option<((i32, i32), f32)> {
+    let (point, _, scale_x, _) = cursor_geometry()?;
+    Some(((point.x, point.y), scale_x))
 }
 
 /// The cursor, and the effective DPI of its monitor, in one trip to Win32.

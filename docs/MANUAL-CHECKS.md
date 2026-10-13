@@ -223,17 +223,27 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
-### 1f. The frame, and an opaque panel
+### 1f. The frame, and the frosted panel
 
-The panel is **opaque**. It does not capture the screen behind it, so nothing
-shows through the card — this changed 2026-10-03, when the frosted backdrop and
-the translucency were removed together. Nothing is photographed from the display
-any more either, which is worth knowing if you were avoiding the launcher for that
-reason.
+The panel is a translucent tint over a blurred screen capture. Captures happen
+before the first window exists and after each hide, never while the popup is
+visible; the next show reuses the last image.
 
-- [ ] Put a window full of text behind the launcher and press the hotkey.
-      **Expected:** not one pixel of it is visible inside the panel. If the
-      desktop shows through, `Theme::DARK.background.a` is no longer 1.0.
+- [ ] Put a window full of text behind the launcher, then hide and reopen it.
+      **Expected:** the text is visibly softened beneath the panel, while Orca's
+      own text stays crisp. If desktop text is sharp, the blur image was not
+      installed; if the sampled content does not match the window behind the
+      panel, check the capture bounds and display scaling.
+- [ ] Hide the launcher, change what is behind it, then reopen it.
+      **Expected:** the reopened panel shows the sample taken just after the
+      hide, not the popup itself. A change made after hiding will appear only
+      after the next hide-and-reopen cycle. The log should report
+      `backdrop: captured and blurred` from `hidden window region` after hiding.
+- [ ] Move the cursor to monitors with different DPI scales, including one left
+      of the primary display; hide and reopen once at each location.
+      **Expected:** after the hide refresh, the captured content stays aligned
+      beneath the panel at each scale; negative coordinates must not shift or
+      mirror the sample. The first show after moving may use the previous sample.
 - [ ] Around the panel — roughly 32px on every side — you see the **desktop**, not
       black. A black square the size of the whole window means the swap chain's
       alpha is being ignored. This is `WindowOptions::window_background` and it is
@@ -255,8 +265,9 @@ reason.
       exits. Two separate bugs met here: a null `hIcon` gave a blank slot, and a
       *fatal* icon load meant no tray at all — which on a resident app means no
       way to quit. If the icon is blank, say so and paste the `tray:` lines.
-- [ ] No line mentioning `backdrop` appears in the log, at startup or on any
-      toggle. One is a leftover call site.
+- [ ] The startup log reports a capture from `startup region`, and each hide
+      reports one from `hidden window region`. There must be no capture log on
+      the show path.
 
 ## 2. Latency, now that the window is retained
 
@@ -269,11 +280,10 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
 (so it measures pixels, not window objects).
 
-> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
-> is gone (section 1f), so `show` no longer does any capture work — not
-> synchronously, not on the background executor. Every `paint N ms` reading taken
-> before that change included 20–50 ms of `BitBlt` plus box blur and is not a
-> baseline for the current build. Re-measure from scratch.
+> Capture and blur run on `BackgroundExecutor` at startup and after hide; the
+> show path does not wait for them. The measured 20–50 ms capture/blur cost is
+> outside the hotkey-to-first-paint path, though the first frame may use the
+> previous image if startup capture has not finished yet. Re-measure from scratch.
 
 1. Start the launcher, toggle it open ten times, and read the `paint N ms`
    figures off the status line each time.
@@ -538,9 +548,6 @@ arithmetic and the wiring compile, and neither of those is a window.
 
 So nobody assumes otherwise:
 
-- **The frosted backdrop is deferred, deliberately.** The panel is opaque and
-  nothing is captured from the screen — which also means the launcher no longer
-  photographs part of the display on every hotkey press. See section 1f.
 - **Multi-monitor and DPI are untested at runtime.** The selection logic is
   unit-tested; the DPI conversion is not tested anywhere.
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system

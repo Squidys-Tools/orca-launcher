@@ -35,6 +35,7 @@ path = "src/main.rs"
 async-channel.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+image = { version = "0.25", default-features = false }
 orca-core = { path = "../orca-core" }
 orca-win = { path = "../orca-win" }
 raw-window-handle = "0.6.2"
