@@ -71,7 +71,8 @@ use orca_win::{
 use crate::catalog::{Catalog, Engine};
 use crate::providers::StdFsDirectory;
 use crate::ui::{
-    HideAction, Launcher, LauncherView, Telemetry, WINDOW_COMPACT_HEIGHT, WINDOW_WIDTH,
+    HideAction, Launcher, LauncherView, Telemetry, WINDOW_COMPACT_HEIGHT, WINDOW_HEIGHT,
+    WINDOW_WIDTH,
 };
 
 /// Tray command: show the popup.
@@ -536,11 +537,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     let focus = cx.update(|app| launcher.read(app).focus.clone());
     let first_bounds = cx.update(|app| {
         let (display, _) = win::display_under_cursor(app);
-        Bounds::centered(
-            display,
-            size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
-            app,
-        )
+        compact_bounds(display, app)
     });
     // Building the window is the only work left on the first open.
     let create = cx.update(|app| {
@@ -706,18 +703,13 @@ fn spawn_command_pump(
         .ok();
 }
 
-/// Moves and collapses the popup to the cursor's monitor, centred in its work area.
+/// Moves and collapses the popup to its fixed vertical anchor on the cursor's monitor.
 ///
-/// A no-op if the `HWND` is unavailable, which leaves the window where the
-/// platform put it — the right failure, because a window at the wrong position
-/// is recoverable and one that was never placed is not.
+/// If the `HWND` is unavailable, GPUI still resizes the window but its position
+/// stays where the platform put it.
 fn place_on_cursor(window: &mut Window, app: &App) {
     let (display, scale_factor) = win::display_under_cursor(app);
-    let target = Bounds::centered(
-        display,
-        size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
-        app,
-    );
+    let target = compact_bounds(display, app);
     if let Some(hwnd) = win::hwnd(window) {
         win::move_to(
             hwnd,
@@ -726,7 +718,35 @@ fn place_on_cursor(window: &mut Window, app: &App) {
             scale_factor,
         );
     }
-    window.resize(size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)));
+    window.resize(target.size);
+}
+
+fn compact_bounds(display_id: Option<DisplayId>, app: &App) -> Bounds<Pixels> {
+    let fallback = size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT));
+    let display = display_id
+        .and_then(|id| app.find_display(id))
+        .or_else(|| app.primary_display());
+    let Some(display) = display else {
+        return Bounds::centered(display_id, fallback, app);
+    };
+
+    let work_area = display.visible_bounds();
+    let window_size = fallback.min(&work_area.size);
+    let origin = point(
+        px(work_area.origin.x.as_f32()
+            + (work_area.size.width.as_f32() - window_size.width.as_f32()) / 2.0),
+        px(compact_anchor_y(
+            work_area.origin.y.as_f32(),
+            work_area.size.height.as_f32(),
+        )),
+    );
+    Bounds::new(origin, window_size)
+}
+
+fn compact_anchor_y(work_area_top: f32, work_area_height: f32) -> f32 {
+    let preferred = work_area_top + work_area_height * 0.25 - WINDOW_COMPACT_HEIGHT / 2.0;
+    let maximum = (work_area_top + work_area_height - WINDOW_HEIGHT).max(work_area_top);
+    preferred.clamp(work_area_top, maximum)
 }
 
 #[cfg(test)]
@@ -751,7 +771,10 @@ mod tests {
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
     use std::sync::{Arc, Mutex};
 
-    use super::{build_engine, spawn_command_pump, UiCommand, WINDOW_COMPACT_HEIGHT, WINDOW_WIDTH};
+    use super::{
+        build_engine, compact_anchor_y, spawn_command_pump, UiCommand, WINDOW_COMPACT_HEIGHT,
+        WINDOW_WIDTH,
+    };
     // The panel dimensions and the margin are not used outside this module, so
     // they are imported here rather than at the crate root where they would be
     // dead code in the binary.
@@ -964,6 +987,24 @@ mod tests {
         assert_eq!(WINDOW_WIDTH, POPUP_WIDTH + FRAME_MARGIN * 2.0);
         assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT + FRAME_MARGIN * 2.0);
         assert_eq!(WINDOW_COMPACT_HEIGHT, 128.0);
+    }
+
+    #[test]
+    fn the_compact_anchor_is_three_quarters_up_when_the_full_panel_fits() {
+        let top = 24.0;
+        let height = 720.0;
+        let anchor = compact_anchor_y(top, height);
+
+        assert_eq!(anchor, top + height * 0.25 - WINDOW_COMPACT_HEIGHT / 2.0);
+        assert!(anchor + WINDOW_HEIGHT <= top + height);
+    }
+
+    #[test]
+    fn the_compact_anchor_clamps_up_to_fit_the_full_panel() {
+        let top = 12.0;
+        let height = 512.0;
+
+        assert_eq!(compact_anchor_y(top, height), top + height - WINDOW_HEIGHT);
     }
 
     /// The tightest display the launcher claims to work on: a 1366×768 laptop

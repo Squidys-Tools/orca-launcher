@@ -19,7 +19,6 @@ mod launch {
 mod win {
     pub type Hwnd = ();
 
-    pub fn move_to(_: Hwnd, _: f32, _: f32, _: f32) {}
     pub fn set_shown(_: Hwnd, _: bool) {}
 }
 

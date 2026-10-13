@@ -69,16 +69,21 @@ the popup, that is a bug.
 
 1. Press the hotkey from another app.
    **Expected:** a focused search bar appears with no result list or status
-   footer; the outer window is about 128 logical pixels high.
+   footer; its center is about one-quarter down the visible work area (three-
+   quarters up from the bottom), and the outer window is about 128 logical
+   pixels high.
 2. Type a query.
-   **Expected:** the window expands around its center to show the existing
-   results and footer. The field keeps focus while the list appears.
+   **Expected:** the window expands in place to show the existing results and
+   footer. Its top edge stays anchored and the field keeps focus.
 3. Delete the whole query.
    **Expected:** results and footer disappear and the window shrinks back to the
-   search bar. No old results remain behind it.
-4. Press <kbd>Esc</kbd>, then the hotkey again.
+   search bar without moving its anchor. No old results remain behind it.
+4. Type and clear a query five times.
+   **Expected:** the window stays at the same screen position through every
+   cycle; it does not drift down or offscreen.
+5. Press <kbd>Esc</kbd>, then the hotkey again.
    **Expected:** the launcher reopens in the compact state.
-5. If a display with scaling above 100% is available, repeat the expand/clear
+6. If a display with scaling above 100% is available, repeat the expand/clear
    steps there.
    **Expected:** the panel and its contents remain fully visible at that scale.
 
