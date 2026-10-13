@@ -1,0 +1,126 @@
+name: GPUix Windows GNU smoke
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gpuix-windows-gnu-smoke.yml
+      - docs/ARCHITECTURE.md
+      - crates/orca/**
+      - crates/orca-core/**
+      - crates/orca-win/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-load:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-pc-windows-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-nodejs
+          path-type: inherit
+
+      - name: Prefer the MINGW runtime and linker
+        run: echo "$(cygpath -w "$MINGW_PREFIX/bin")" >> "$GITHUB_PATH"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/checkout@v4
+        with:
+          repository: remorses/gpuix
+          ref: 6a5c7c142ac32f9eb0caefe0121be995cfc18631
+          path: gpuix
+          submodules: recursive
+
+      - name: Install the GNU Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc --version --verbose
+          test -f "$MINGW_PREFIX/bin/libnode.dll"
+          test -f "$MINGW_PREFIX/lib/libnode.dll.a"
+          node -e 'const v=process.config?.variables ?? {}; if (v.shlib_suffix !== "dll.a" && v.node_target_type !== "shared_library") throw new Error(`Expected MSYS2 MINGW Node, got ${JSON.stringify(v)}`)'
+
+      - name: Cache GPUix build output
+        uses: actions/cache@v4
+        with:
+          path: gpuix/packages/native/target
+          key: ${{ runner.os }}-gpuix-windows-gnu-${{ hashFiles('gpuix/packages/native/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-gpuix-windows-gnu-
+
+      - name: Configure the smoke target
+        working-directory: gpuix/packages/native
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          packageJson.napi.targets = ['x86_64-pc-windows-gnu']
+          fs.writeFileSync('package.json', `${JSON.stringify(packageJson, null, 2)}\n`)
+          NODE
+
+      - name: Build the release addon
+        working-directory: gpuix/packages/native
+        run: |
+          export LIBNODE_PATH="$(cygpath -w "$MINGW_PREFIX/bin")"
+          bunx @napi-rs/cli@3.10.4 build --platform --release --features test-support --target x86_64-pc-windows-gnu
+          test -f gpuix-native.win32-x64-gnu.node
+
+      - name: Load and exercise the addon under MINGW Node
+        working-directory: gpuix/packages/native
+        run: |
+          node - <<'NODE'
+          const { statSync } = require('node:fs')
+          const binding = require('./')
+          if (binding.__napiBindingTarget !== 'win32-x64-gnu') {
+            throw new Error(`Loaded ${binding.__napiBindingTarget}, expected win32-x64-gnu`)
+          }
+          const renderer = new binding.TestGpuixRenderer(320, 200)
+          renderer.createElement(1, 'text')
+          renderer.setText(1, 'Windows GNU smoke')
+          renderer.setRoot(1)
+          renderer.flush()
+          renderer.captureScreenshot('windows-gnu-smoke.png')
+          if (renderer.getAllText()[0] !== 'Windows GNU smoke' || statSync('windows-gnu-smoke.png').size === 0) {
+            throw new Error('GPUix test renderer failed under MINGW Node')
+          }
+          NODE
+
+      - name: Verify and install the platform package
+        working-directory: gpuix/packages/native
+        run: |
+          bunx @napi-rs/cli@3.10.4 create-npm-dirs
+          bunx @napi-rs/cli@3.10.4 pre-publish --tag-style npm --no-gh-release --skip-optional-publish
+          node - <<'NODE'
+          const fs = require('node:fs')
+          const path = 'npm/win32-x64-gnu/package.json'
+          const metadata = JSON.parse(fs.readFileSync(path, 'utf8'))
+          delete metadata.libc
+          fs.writeFileSync(path, `${JSON.stringify(metadata, null, 2)}\n`)
+          if (metadata.os?.[0] !== 'win32' || metadata.cpu?.[0] !== 'x64') {
+            throw new Error('Generated package has the wrong platform constraints')
+          }
+          NODE
+          pack_dir="$(cygpath -u "$RUNNER_TEMP")"
+          tarball="$(cd npm/win32-x64-gnu && npm pack --pack-destination "$pack_dir" --silent)"
+          consumer_dir="$pack_dir/gpuix-gnu-consumer"
+          mkdir -p "$consumer_dir"
+          printf '{"name":"gpuix-gnu-consumer","version":"1.0.0","private":true}\n' > "$consumer_dir/package.json"
+          cd "$consumer_dir"
+          npm install --ignore-scripts --no-audit --no-fund "$pack_dir/$tarball"
+          node -e "const binding = require('@gpuix/native-win32-x64-gnu'); if (typeof binding.GpuixRenderer !== 'function') throw new Error('Installed GNU package did not load')"
