@@ -17,7 +17,7 @@
 //! The panel is **opaque**, so its own RGB is the colour the user sees and a
 //! contrast check needs no help. What is *not* opaque is everything painted on
 //! top of it: the selection fill, the footer pills, the border. Those are
-//! alpha-blended over the panel, and a `10%`-white selection over a near-black
+//! alpha-blended over the panel, and a `15%`-white selection over a near-black
 //! panel is a slightly lighter near-black — which is what makes a highlighted
 //! row readable, and is also why checking the selection's raw RGB against the
 //! text would score a number about nothing.
@@ -93,13 +93,13 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba(0x0a0a0d),
-        surface: rgba_alpha(0xffffff, 0.07),
-        border: rgba_alpha(0xffffff, 0.11),
-        selection: rgba_alpha(0xffffff, 0.10),
-        text: rgba(0xf6f6f8),
+        background: rgba(0x101014),
+        surface: rgba_alpha(0xffffff, 0.08),
+        border: rgba_alpha(0xffffff, 0.12),
+        selection: rgba_alpha(0xffffff, 0.15),
+        text: rgba(0xf2f2f2),
         dim: rgba(0xb0b0ba),
-        accent: rgba(0x5b9dff),
+        accent: rgba(0x4c9bff),
         on_selection: rgba(0xffffff),
     };
 
@@ -235,7 +235,7 @@ mod tests {
     ///
     /// `fill` is composited *on top of* the panel. The panel cannot be skipped:
     /// a selection highlight does not sit on the desktop, it sits on the panel,
-    /// and a 10%-white highlight over a near-black panel is dark enough for white
+    /// and a 15%-white highlight over a near-black panel is dark enough for white
     /// text to clear 4.5:1 on. Compositing it against anything else scores a
     /// number about nothing.
     fn drawn_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {

@@ -13,7 +13,7 @@
 //! | [`hwnd`] | a way to reach a GPUI window's `HWND` | hide/show and reposition need it, and nothing in GPUI's public API yields it |
 //! | [`set_shown`] | `Window::hide` / `Window::show` | the persistent-window design; see below |
 //! | [`move_to`] | `Window::set_position` | a retained window must follow the cursor to another monitor |
-//! | [`logical_cursor`] | a cursor-position read | "centre on the cursor's monitor" is the placement rule |
+//! | [`display_under_cursor`] | a cursor-position and monitor-scale read | "centre on the cursor's monitor" is the placement rule |
 //! | [`round_corners`] | `DWMWA_WINDOW_CORNER_PREFERENCE` | see "Rounded corners" below |
 //!
 //! The correct home for all five is `orca-win`, which was already merged and is
@@ -52,9 +52,9 @@
 //! divides by the per-monitor scale factor before publishing it (see
 //! `check_given_bounds` in `gpui_windows/src/display.rs`, which multiplies back
 //! before calling `MonitorFromPoint`). Comparing the two directly would pick
-//! the wrong monitor on any display that is not at 100%, so [`logical_cursor`]
-//! converts. The conversion needs the cursor's monitor DPI, which
-//! [`logical_cursor`] gets from `GetDpiForMonitor`.
+//! the wrong monitor on any display that is not at 100%, so
+//! [`display_under_cursor`] converts. The conversion needs the cursor's monitor
+//! DPI, which it gets from `GetDpiForMonitor`.
 //!
 //! The interesting half — which display contains a point — is
 //! [`display_containing`], which is pure and tested.
@@ -449,14 +449,23 @@ pub fn raise(hwnd: HWND) {
 ///
 /// Leaves size, z-order and activation alone; `SWP_NOSIZE`/`SWP_NOZORDER`/
 /// `SWP_NOACTIVATE` are the point. `SWP_NOOWNERZORDER` keeps a popup from
-/// dragging its owner forward with it.
-pub fn move_to(hwnd: HWND, x: f32, y: f32) {
+/// dragging its owner forward with it. `scale_factor` belongs to the target
+/// monitor, because this can move the window across displays.
+pub fn move_to(hwnd: HWND, x: f32, y: f32, scale_factor: f32) {
     let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     // SAFETY: as above. `SetWindowPos` with `SWP_NOSIZE` cannot change the
     // window's size, and a failure here leaves the window where it was, which
     // the caller treats as "keep the old position".
     unsafe {
-        let _ = SetWindowPos(hwnd, None, x.round() as i32, y.round() as i32, 0, 0, flags);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            (x * scale_factor).round() as i32,
+            (y * scale_factor).round() as i32,
+            0,
+            0,
+            flags,
+        );
     }
 }
 
@@ -465,10 +474,32 @@ pub fn move_to(hwnd: HWND, x: f32, y: f32) {
 /// The scale factor is the DPI of the monitor the cursor is on, which is the
 /// only monitor that matters: the point is about to be tested against that
 /// monitor's bounds, and against any other it will not match.
+#[cfg(test)]
 #[must_use]
 pub fn logical_cursor() -> Option<(f32, f32)> {
     let (point, _, scale_x, scale_y) = cursor_geometry()?;
     Some((point.x as f32 / scale_x, point.y as f32 / scale_y))
+}
+
+fn monitor_scale_factors(monitor: HMONITOR) -> Option<(f32, f32)> {
+    let mut dpi_x: u32 = 0;
+    let mut dpi_y: u32 = 0;
+    // SAFETY: both out-pointers are live and writable, and `monitor` came from
+    // a Win32 monitor query.
+    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.ok()?;
+
+    let scale_x = dpi_x as f32 / BASELINE_DPI;
+    let scale_y = dpi_y as f32 / BASELINE_DPI;
+    (scale_x > 0.0 && scale_y > 0.0).then_some((scale_x, scale_y))
+}
+
+fn primary_scale_factor() -> f32 {
+    const ORIGIN: POINT = POINT { x: 0, y: 0 };
+    // SAFETY: `MonitorFromPoint` is a pure query over a `POINT` by value.
+    let monitor = unsafe { MonitorFromPoint(ORIGIN, MONITOR_DEFAULTTOPRIMARY) };
+    monitor_scale_factors(monitor)
+        .map(|(scale_x, _)| scale_x)
+        .unwrap_or(1.0)
 }
 
 /// The cursor, and the effective DPI of its monitor, in one trip to Win32.
@@ -484,31 +515,28 @@ fn cursor_geometry() -> Option<(POINT, HMONITOR, f32, f32)> {
 
     // SAFETY: `MonitorFromPoint` is a pure query over a `POINT` by value.
     let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY) };
-
-    let mut dpi_x: u32 = 0;
-    let mut dpi_y: u32 = 0;
-    // SAFETY: both out-pointers are live and writable, and `monitor` is a real
-    // handle: `MONITOR_DEFAULTTOPRIMARY` guarantees a primary monitor exists.
-    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.ok()?;
-
-    let scale_x = dpi_x as f32 / BASELINE_DPI;
-    let scale_y = dpi_y as f32 / BASELINE_DPI;
-    if scale_x <= 0.0 || scale_y <= 0.0 {
-        return None;
-    }
+    let (scale_x, scale_y) = monitor_scale_factors(monitor)?;
     Some((point, monitor, scale_x, scale_y))
 }
 
-/// The display the cursor is on.
+/// The display and scale factor the cursor is on.
 ///
-/// Falls back to `None` — which `Bounds::centered` reads as "primary display" —
-/// at every step that can fail, because a launcher that opens on the wrong
-/// monitor is recoverable and one that opens at the origin is not useful.
+/// Falls back to the primary display and its scale factor when cursor or monitor
+/// lookup fails, because a launcher that opens on the wrong monitor is
+/// recoverable and one that opens at the origin is not useful.
 #[must_use]
-pub fn display_under_cursor(app: &App) -> Option<DisplayId> {
-    let cursor = logical_cursor()?;
-    let displays = displays(app);
-    display_containing(cursor, &displays)
+pub fn display_under_cursor(app: &App) -> (Option<DisplayId>, f32) {
+    let Some((point, _, scale_x, scale_y)) = cursor_geometry() else {
+        return (None, primary_scale_factor());
+    };
+    let cursor = (point.x as f32 / scale_x, point.y as f32 / scale_y);
+    let display = display_containing(cursor, &displays(app));
+    let scale_factor = if display.is_some() {
+        scale_x
+    } else {
+        primary_scale_factor()
+    };
+    (display, scale_factor)
 }
 
 /// What activating a [`LaunchTarget`] amounts to.
