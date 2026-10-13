@@ -66,6 +66,7 @@ jobs:
           path: gpuix/packages/native/target
           key: ${{ runner.os }}-gpuix-windows-gnu-${{ hashFiles('gpuix/packages/native/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-gpuix-windows-gnu-
+          save-always: true
 
       - name: Configure the smoke target
         working-directory: gpuix/packages/native
