@@ -92,13 +92,18 @@ jobs:
           node - <<'NODE'
           const { statSync } = require('node:fs')
           const binding = require('./')
-          if (binding.__napiBindingTarget !== 'win32-x64-gnu') {
-            throw new Error(`Loaded ${binding.__napiBindingTarget}, expected win32-x64-gnu`)
+          if (typeof binding.hasTestGpuixRenderer !== 'function' || !binding.hasTestGpuixRenderer()) {
+            throw new Error('GPUix test renderer was not compiled into the GNU addon')
+          }
+          if (typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
+            throw new Error('GPUix renderer exports were not loaded')
           }
           const renderer = new binding.TestGpuixRenderer(320, 200)
-          renderer.createElement(1, 'text')
-          renderer.setText(1, 'Windows GNU smoke')
-          renderer.setRoot(1)
+          renderer.applyBatch(JSON.stringify([
+            ['createElement', 1, 'text'],
+            ['setText', 1, 'Windows GNU smoke'],
+            ['setRoot', 1],
+          ]))
           renderer.flush()
           renderer.captureScreenshot('windows-gnu-smoke.png')
           if (renderer.getAllText()[0] !== 'Windows GNU smoke' || statSync('windows-gnu-smoke.png').size === 0) {
