@@ -67,10 +67,8 @@
 //! attribute looks like the obvious answer first:
 //!
 //! * `DWMWA_WINDOW_CORNER_PREFERENCE` is Windows 11 only, offers only a few
-//!   radii (8px, 4px, none), and rounds the *window*. The panel wants about
-//!   20px, and the window is deliberately larger than the panel so the drop
-//!   shadow has somewhere to live — so DWM would round the outside edge of the
-//!   shadow, which is the one edge that has to stay square.
+//!   radii (8px, 4px, none), and rounds the *window*. The panel wants 16px, so
+//!   DWM would replace the painted radius with a smaller system radius.
 //! * It only reaches windows DWM redirects, and `gpui_windows` sets
 //!   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
 //!   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set — in
@@ -82,8 +80,7 @@
 //! call.
 //!
 //! This function therefore *suppresses* the DWM rounding rather than asking for
-//! it, so a Windows 11 build cannot quietly round the window's outer edge and
-//! clip the shadow the panel is floating on.
+//! it, so a Windows 11 build cannot quietly replace the panel's painted radius.
 //!
 //! # The frame around the window
 //!
@@ -102,7 +99,7 @@
 //! The two things are independent, and that is what makes this fixable: the
 //! per-pixel alpha comes from the Direct Composition swap chain being cleared
 //! to `[0, 0, 0, 0]`, not from the accent policy. So turning the policy back off
-//! removes the frame and leaves the shadow margin transparent.
+//! removes the frame without changing per-pixel transparency.
 //!
 //! Hence [`clear_window_frame`]. It is `Opaque`'s `accent_state` of `0` —
 //! `WCA_ACCENT_ENABLE_NONE` — applied after GPUI has set the appearance.
@@ -238,10 +235,9 @@ pub fn activate(hwnd: HWND) -> bool {
 
 /// Stops DWM from rounding the window's own corners.
 ///
-/// The panel rounds itself; see the module docs for why. This exists so that
-/// the one edge which must stay square — the outside of the drop shadow — stays
-/// square on Windows 11, where DWM rounds frameless top-level windows by
-/// default.
+/// The panel rounds itself; see the module docs for why. This exists so DWM
+/// cannot replace the painted radius with its smaller system radius on Windows
+/// 11, where it rounds frameless top-level windows by default.
 ///
 /// Reports whether Windows accepted the request. `false` is not a failure to
 /// act on: the attribute is Windows 11 build 22000 and later, and on anything
@@ -287,9 +283,7 @@ pub fn round_corners(hwnd: HWND) -> bool {
 ///   *colour*, not a flag, and the sentinel that removes it is `0xFFFFFFFE` —
 ///   passing black would just draw a black border.
 /// * `DWMWA_NCRENDERING_POLICY` → `DWMNCRP_DISABLED`. DWM's automatic drop
-///   shadow. We draw our own, on the panel; DWM's is around the *window*,
-///   which is the larger rectangle, so it sits outside ours rather than behind
-///   it.
+///   shadow, which is not part of the panel design.
 ///
 /// Both are then read back with `DwmGetWindowAttribute` and reported. If the
 /// read-back says the border colour is `none` and a frame is *still* visible,

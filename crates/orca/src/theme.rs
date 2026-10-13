@@ -23,7 +23,7 @@
 //! The tests use the same source-over math as the renderer's blend state, then
 //! measure the lowest contrast over the two extreme backdrops.
 
-use gpui::{hsla, px, BoxShadow, Rgba};
+use gpui::Rgba;
 use orca_core::config::ThemePreference;
 use orca_core::Source;
 
@@ -82,25 +82,25 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba_alpha(0x101014, 0.80),
-        surface: rgba_alpha(0xffffff, 0.08),
-        border: rgba_alpha(0xffffff, 0.12),
-        selection: rgba_alpha(0xffffff, 0.15),
-        text: rgba(0xf2f2f2),
-        dim: rgba(0xc4c4cc),
-        accent: rgba(0x74adff),
+        background: rgba_alpha(0x0a0a0d, 0.65),
+        surface: rgba_alpha(0xffffff, 0.07),
+        border: rgba_alpha(0xffffff, 0.11),
+        selection: rgba_alpha(0xffffff, 0.06),
+        text: rgba(0xf6f6f8),
+        dim: rgba(0xececf1),
+        accent: rgba(0xe3efff),
         on_selection: rgba(0xffffff),
     };
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba_alpha(0xf4f4f7, 0.80),
+        background: rgba_alpha(0xf4f4f7, 0.65),
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
         text: rgba(0x16161a),
-        dim: rgba(0x42424a),
-        accent: rgba(0x08468f),
+        dim: rgba(0x2c2c34),
+        accent: rgba(0x082b5a),
         on_selection: rgba(0x16161a),
     };
 
@@ -122,21 +122,6 @@ impl Theme {
                 }
             }
         }
-    }
-
-    /// The drop shadow under the panel.
-    ///
-    /// Two shadows rather than one, because a single large blur reads as a grey
-    /// halo: the tight one is the contact shadow that says the panel is above
-    /// the desktop, and the wide one is the ambient occlusion that says it is
-    /// floating. This is the reason the window is larger than the panel — the
-    /// ambient shadow needs somewhere to go.
-    #[must_use]
-    pub fn panel_shadows(self) -> Vec<BoxShadow> {
-        vec![
-            BoxShadow::new(px(0.), px(2.), hsla(0.0, 0.0, 0.0, 0.44)).blur_radius(px(6.)),
-            BoxShadow::new(px(0.), px(24.), hsla(0.0, 0.0, 0.0, 0.30)).blur_radius(px(56.)),
-        ]
     }
 }
 
@@ -291,7 +276,7 @@ mod tests {
     fn the_panel_is_translucent_but_keeps_a_readable_tint() {
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             assert!(
-                theme.background.a < 0.85,
+                theme.background.a < 0.7,
                 "{name}: panel tint hides too much of the backdrop (alpha {})",
                 theme.background.a
             );
@@ -336,8 +321,8 @@ mod tests {
             "half black over black should be black, got {}",
             over_black.r
         );
-        // Fully transparent on top leaves the backdrop untouched, which is what
-        // the unpainted shadow margin around the panel relies on.
+        // Fully transparent on top leaves the desktop untouched, which is what
+        // the rounded panel's corners rely on.
         let clear = composite_over(rgba_alpha(0xff0000, 0.0), rgba(0x123456));
         assert_eq!(clear.r, rgba(0x123456).r);
         assert_eq!(clear.a, 1.0, "an opaque backdrop stays opaque");
@@ -359,21 +344,5 @@ mod tests {
                 "{source:?} name {name:?} is too wide for one row"
             );
         }
-    }
-
-    #[test]
-    fn the_shadow_has_a_tight_layer_and_a_wide_one() {
-        // One blur cannot do both jobs: a wide one alone reads as a grey halo
-        // rather than as a panel above a surface, and a tight one alone reads
-        // as a sticker. The wide layer is also why the window is larger than
-        // the panel, so the ordering of the two is the property that matters.
-        let shadows = Theme::DARK.panel_shadows();
-        assert_eq!(shadows.len(), 2);
-        let (tight, wide) = (&shadows[0], &shadows[1]);
-        assert!(
-            tight.blur_radius < wide.blur_radius,
-            "the contact shadow must be the tighter of the two"
-        );
-        assert!(wide.offset.y > tight.offset.y, "the wide shadow sits lower");
     }
 }

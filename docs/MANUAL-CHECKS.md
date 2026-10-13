@@ -246,10 +246,12 @@ show path reuses the latest completed image without waiting.
       **Expected:** after the hide refresh, the captured content stays aligned
       beneath the panel at each scale; negative coordinates must not shift or
       mirror the sample. The first show after moving may use the previous sample.
-- [ ] Around the panel — roughly 32px on every side — you see the **desktop**, not
-      black. A black square the size of the whole window means the swap chain's
-      alpha is being ignored. This is `WindowOptions::window_background` and it is
-      load-bearing.
+- [ ] Start with the compact search bar, then type a query to expand the panel.
+      The blurred capture must fill the expanded panel rather than stretching
+      the compact bar's shorter sample vertically.
+- [ ] The desktop stays visible right up to the panel's rounded edges. There is
+      no square image/tint at the corners and no black rectangle outside the
+      panel; either means per-pixel alpha or rounded-layer clipping is broken.
 - [ ] **There must be no 1px frame around the panel**, and the corners are rounded
       with a radius visibly larger than the selected row's. Read the log:
       ```
@@ -260,9 +262,8 @@ show path reuses the latest completed image without waiting.
       | `window frame cleared=true` | The frame removal was accepted by Windows. |
       | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. |
       | `DWM corner rounding suppressed=false` | Expected below Windows 11, a defect on it. |
-- [ ] The drop shadow is soft and **not cut off** at the window edge, and looks
-      like two layers rather than one grey halo. A hard straight edge means
-      `ui::FRAME_MARGIN` is too small for the 56px blur.
+- [ ] No shadow or grey halo appears around the panel. The log should report
+      `dwm shadow suppressed=true`; DWM's shadow is not part of the panel.
 - [ ] The tray shows a real icon, not a blank slot, and right-click → *Quit*
       exits. Two separate bugs met here: a null `hIcon` gave a blank slot, and a
       *fatal* icon load meant no tray at all — which on a resident app means no

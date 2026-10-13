@@ -590,7 +590,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 // clears the render target to `[0, 0, 0, 0]` for every
                 // non-opaque appearance and presents through a
                 // `DXGI_ALPHA_MODE_PREMULTIPLIED` Direct Composition swap
-                // chain, so the shadow margin around the panel is genuinely
+                // chain, so the rounded panel corners are genuinely
                 // see-through instead of black. See `ui`'s module docs.
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
@@ -884,12 +884,9 @@ mod tests {
 
     use super::{
         build_engine, compact_anchor_y, spawn_command_pump, UiCommand, WINDOW_COMPACT_HEIGHT,
-        WINDOW_WIDTH,
+        WINDOW_HEIGHT, WINDOW_WIDTH,
     };
-    // The panel dimensions and the margin are not used outside this module, so
-    // they are imported here rather than at the crate root where they would be
-    // dead code in the binary.
-    use crate::ui::{FRAME_MARGIN, POPUP_HEIGHT, POPUP_WIDTH, WINDOW_HEIGHT};
+    use crate::ui::{POPUP_HEIGHT, POPUP_WIDTH};
 
     #[test]
     fn the_command_pump_keeps_draining_across_a_long_idle_period() {
@@ -1089,15 +1086,11 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_the_panel_plus_a_shadow_margin() {
-        // The panel is 660 wide, and the window is that plus 32px of transparent
-        // margin on each side. The margin is not padding: the widest shadow
-        // blur is 56px, so a window sized to the panel would clip its own
-        // shadow into a hard rectangle. See `ui::FRAME_MARGIN`.
+    fn the_window_matches_the_panel_bounds() {
         assert_eq!(POPUP_WIDTH, 660.0);
-        assert_eq!(WINDOW_WIDTH, POPUP_WIDTH + FRAME_MARGIN * 2.0);
-        assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT + FRAME_MARGIN * 2.0);
-        assert_eq!(WINDOW_COMPACT_HEIGHT, 128.0);
+        assert_eq!(WINDOW_WIDTH, POPUP_WIDTH);
+        assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT);
+        assert_eq!(WINDOW_COMPACT_HEIGHT, 64.0);
     }
 
     #[test]
@@ -1124,11 +1117,8 @@ mod tests {
 
     #[test]
     fn the_window_fits_the_smallest_display_we_support() {
-        // The failure this guards against is quiet: the panel alone was a
-        // sensible size, and only overflowed once the shadow margin was added
-        // on all four sides. Windows then clamps the window to the work area,
-        // which crops the panel rather than failing, so the launcher looks
-        // subtly wrong on exactly the machines least able to spare the pixels.
+        // Windows silently clamps oversized windows to the work area, which
+        // crops the panel rather than failing on exactly the smallest displays.
         let (width, height) = SMALLEST_DISPLAY;
         assert!(
             WINDOW_WIDTH <= width,

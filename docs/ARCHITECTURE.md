@@ -284,7 +284,7 @@ each item names the gap it fills:
 | `SetWindowPos` | `Window::set_position` does not exist |
 | `GetCursorPos` + `MonitorFromPoint` + `GetDpiForMonitor` | "centre on the cursor's monitor" needs a cursor read |
 | `ShellExecuteW` | neither crate opens a `LaunchTarget` |
-| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would clip the panel's drop shadow |
+| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would replace the panel's painted radius |
 
 Six functions, in one file, the only `unsafe` in the crate, each with the gap
 named above it. The right home for all six is `orca-win`, which was already
@@ -423,20 +423,18 @@ a `Send` future, and any future holding a GPUI type is `!Send`, because
 polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
 live on the foreground executor. It is not a slow path, it is a dead one.
 
-## The window is transparent, and larger than the panel
+## The window is transparent and panel-sized
 
 The popup is a rounded panel floating over the desktop rather than a window with
 a title bar, and three separate decisions have to hold for that to come out
 right. All three are in `crates/orca/src/ui.rs` and `main.rs`; recording them
 because each one is a plausible-looking thing to "simplify" back.
 
-**The window is bigger than the panel, on all four sides, by
-`ui::FRAME_MARGIN`.** Not decoration. The widest shadow in
-`Theme::panel_shadows` is a 56px blur offset 24px down, and a window sized to
-the panel clips its own shadow into a hard straight-edged rectangle. The
-consequence is that every placement calculation — `Bounds::centered`,
-`place_on_cursor`, the `rect=` in the show log — is in *window* coordinates, not
-panel coordinates, and the panel is centred inside it.
+**The expanded window matches the panel bounds.** The custom drop shadow and
+DWM's automatic shadow are disabled, so there is no shadow margin to reserve.
+With an empty query, the window shrinks to the 64px search bar; its top-left
+stays at the expanded panel's anchor so typing can expand downward without
+moving the panel.
 
 **`WindowOptions::window_background` is `Transparent`, and the root view is not
 painted.** `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
@@ -451,10 +449,9 @@ inside the panel and on an opaque background.
 `DWMWA_WINDOW_CORNER_PREFERENCE` looks like the answer and is not:
 
 * it is Windows 11 build 22000 and later, with a small set of radii (8px, 4px,
-  none) and no 16–20px option, which is what this design wants;
-* it rounds the **window**, and the window is deliberately larger than the panel,
-  so DWM would round the outside edge of the drop shadow — the one edge that has
-  to stay square;
+  none) and no 16px option, which is what this design uses;
+* it rounds the **window**, replacing the panel's 16px painted radius with the
+  smaller system radius;
 * it only reaches windows DWM redirects, and `gpui_windows` sets
   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled (the
   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set), in which
@@ -463,9 +460,9 @@ inside the panel and on an opaque background.
 Painting the radius has none of those constraints and is antialiased. The
 remaining Win32 call, `win::round_corners`, therefore *suppresses* the DWM
 preference (`DWMWCP_DONOTROUND`) rather than requesting one, so a Windows 11
-build cannot quietly reintroduce the clipped-shadow failure. It logs whether
-Windows accepted it, because that number is the only thing in the log that says
-which path the corners are taking.
+build cannot quietly replace the painted radius. The backdrop image and tint
+also each carry that radius: GPUI's `overflow_hidden` content mask is rectangular
+and does not clip their corners for them.
 
 ### The frosted backdrop: capture while hidden, blur off the show path
 
@@ -478,11 +475,17 @@ so the 20–50ms capture cost previously measured on that path no longer delays
 the hotkey. The tradeoff is deliberate staleness: the image represents the
 desktop at startup or hide time, not the instant the popup opens.
 
+Every capture covers the full 660×430 panel, even when the hidden window is only
+64px tall. A hidden-window refresh derives monitor scale from its measured width
+and uses the expanded panel height; stretching the compact window's measured
+height would turn the backdrop into a vertically distorted strip when results
+appear.
+
 **Why not a native Windows backdrop or a drop-in crate.** The official DWM
 `DwmEnableBlurBehindWindow` call has no blur effect on Windows 8 and later. The
 newer `DWMWA_SYSTEMBACKDROP_TYPE` material paints at the window level, while this
-window includes a transparent shadow margin around a smaller rounded panel; a
-window-wide material would fill that margin. It also requires Windows 11 22H2
+panel's corner radius is painted by GPUI; a window-wide material cannot follow
+that radius and would fill its corners. It also requires Windows 11 22H2
 (build 22621). More importantly, another GPUI application reproduced the same
 backend limitation: DWM Acrylic attributes succeed but do not blur the
 DirectComposition-rendered client area; GPUI needs a backdrop-brush hook in its
@@ -494,7 +497,7 @@ texture, but its own design excludes GPUI until it adds that render hook. A
 renderer-level implementation would mean changing or forking the pinned GPUI
 backend, not adding a dependency. Whole-window helpers such as
 [`window-vibrancy`](https://github.com/tauri-apps/window-vibrancy) do not solve
-the rounded panel/shadow-margin mismatch and document Windows version/performance
+the rounded panel-corner mismatch and document Windows version/performance
 limitations. Those are larger and less reliable changes than this feature needs.
 
 [`GPUix`](https://github.com/remorses/gpuix) is also not a drop-in glass
@@ -569,7 +572,7 @@ The two mechanisms are independent, which is what makes it fixable in six lines:
 the per-pixel alpha comes from the Direct Composition swap chain being cleared
 to `[0, 0, 0, 0]`, **not** from the accent policy. So `win::clear_window_frame`
 sends `accent_state = 0` (`WCA_ACCENT_ENABLE_NONE`) after GPUI has set the
-appearance. The frame goes, the shadow margin stays transparent.
+appearance. The frame goes, and the panel's rounded corners stay transparent.
 
 `SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
 cached, because it is not exported by name in any import library. The

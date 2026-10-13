@@ -11,8 +11,7 @@ tray between uses and can be started at login.
 
 Working today:
 
-- The popup and its frame — a rounded panel in a transparent window larger than
-  itself, so the drop shadow is not clipped.
+- The popup — a rounded translucent panel in a per-pixel transparent window.
 - Global hotkey, tray icon and menu, single-instance guard, autostart.
 - Installed applications, commands and aliases from `config.toml`, environment
   variables, and file and folder search in the user's standard folders by default.

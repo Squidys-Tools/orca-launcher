@@ -6,11 +6,10 @@
 //! a dark panel over a *detailed* desktop is a panel you cannot read, because
 //! the text behind it competes with the text in it. The desktop has to be
 //! blurred, and Windows will not do it for us — `gpui`'s
-//! `WindowBackgroundAppearance::Blurred` and the Mica variants all apply their
-//! material to the whole window rectangle, and the window is deliberately larger
-//! than the panel so its drop shadow has somewhere to live. A backdrop material
-//! would fill the shadow margin too and turn the rounded panel into a rounded
-//! *square*.
+//! `WindowBackgroundAppearance::Blurred` and the Mica variants apply their
+//! material to the whole window rectangle. That material cannot follow the
+//! panel's painted corner radius, so it would turn the rounded panel into a
+//! rounded *square*.
 //!
 //! So we capture the region ourselves and blur it. `docs/ARCHITECTURE.md` has
 //! the full reasoning.
