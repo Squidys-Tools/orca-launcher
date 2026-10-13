@@ -82,25 +82,25 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba_alpha(0x101014, 0.88),
+        background: rgba_alpha(0x101014, 0.80),
         surface: rgba_alpha(0xffffff, 0.08),
         border: rgba_alpha(0xffffff, 0.12),
         selection: rgba_alpha(0xffffff, 0.15),
         text: rgba(0xf2f2f2),
-        dim: rgba(0xb0b0ba),
-        accent: rgba(0x4c9bff),
+        dim: rgba(0xc4c4cc),
+        accent: rgba(0x74adff),
         on_selection: rgba(0xffffff),
     };
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba_alpha(0xf4f4f7, 0.90),
+        background: rgba_alpha(0xf4f4f7, 0.80),
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
         text: rgba(0x16161a),
-        dim: rgba(0x494952),
-        accent: rgba(0x0a4fa8),
+        dim: rgba(0x42424a),
+        accent: rgba(0x08468f),
         on_selection: rgba(0x16161a),
     };
 
@@ -291,8 +291,8 @@ mod tests {
     fn the_panel_is_translucent_but_keeps_a_readable_tint() {
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             assert!(
-                theme.background.a < 0.95,
-                "{name}: panel tint is opaque (alpha {})",
+                theme.background.a < 0.85,
+                "{name}: panel tint hides too much of the backdrop (alpha {})",
                 theme.background.a
             );
             assert!(

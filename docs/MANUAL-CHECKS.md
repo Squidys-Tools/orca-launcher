@@ -231,10 +231,11 @@ If the popup is shown while a capture is pending, that sample is discarded; the
 show path reuses the latest completed image without waiting.
 
 - [ ] Put a window full of text behind the launcher, then hide and reopen it.
-      **Expected:** the text is visibly softened beneath the panel, while Orca's
-      own text stays crisp. If desktop text is sharp, the blur image was not
-      installed; if the sampled content does not match the window behind the
-      panel, check the capture bounds and display scaling.
+      **Expected:** desktop text loses its sharp edges, broad shapes and colors
+      still show through the tint, and Orca's own text stays crisp. If the panel
+      looks opaque or the desktop text stays crisp, the blur or translucent
+      layer is not being applied; if the sampled content does not match the
+      window behind the panel, check the capture bounds and display scaling.
 - [ ] Hide the launcher, change what is behind it, then reopen it.
       **Expected:** the reopened panel shows the sample taken just after the
       hide, not the popup itself. A change made after hiding will appear only

@@ -38,11 +38,11 @@ pub const DOWNSAMPLE: u32 = 4;
 
 /// How many times the box blur runs over the downsampled buffer.
 ///
-/// Three passes of radius 2 is a close enough approximation of a Gaussian to be
-/// indistinguishable at this scale, and a single pass has visible corners.
+/// Three passes of radius 5 make desktop text lose its sharp edges while
+/// keeping large shapes and colors legible through the panel.
 const BLUR_PASSES: usize = 3;
 /// The box blur's half-width, in downsampled pixels.
-const BLUR_RADIUS: u32 = 2;
+const BLUR_RADIUS: u32 = 5;
 
 /// A blurred BGRA image, ready to be handed to the renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,10 +244,12 @@ fn blur_axis(src: &[u8], dst: &mut [u8], width: u32, height: u32, radius: u32, a
             let alpha = acc[3] / samples;
             // Un-premultiply: the sum above is colour*alpha, so dividing by the
             // accumulated alpha gives the colour back.
-            dst[out] = (acc[0] / weight).clamp(0.0, 255.0) as u8;
-            dst[out + 1] = (acc[1] / weight).clamp(0.0, 255.0) as u8;
-            dst[out + 2] = (acc[2] / weight).clamp(0.0, 255.0) as u8;
-            dst[out + 3] = alpha.clamp(0.0, 255.0) as u8;
+            // Round rather than truncate so repeated passes do not darken flat,
+            // partially transparent colors a little at a time.
+            dst[out] = (acc[0] / weight).round().clamp(0.0, 255.0) as u8;
+            dst[out + 1] = (acc[1] / weight).round().clamp(0.0, 255.0) as u8;
+            dst[out + 2] = (acc[2] / weight).round().clamp(0.0, 255.0) as u8;
+            dst[out + 3] = alpha.round().clamp(0.0, 255.0) as u8;
         }
     }
 }
@@ -366,6 +368,26 @@ mod tests {
         assert!(
             outside > 0,
             "no energy reached outside the bright block; the blur is not spreading"
+        );
+    }
+
+    #[test]
+    fn a_hard_edge_is_softened_well_beyond_its_original_position() {
+        let (width, height) = (256u32, 16u32);
+        let mut input = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in width / 2..width {
+                let base = ((y * width + x) * 4) as usize;
+                input[base..base + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+
+        let out = soften(&input, width, height).expect("should soften");
+        let eight_small_pixels_before_edge = out.width / 2 - 8;
+        let spread = pixel_at(&out, eight_small_pixels_before_edge, out.height / 2)[0];
+        assert!(
+            spread > 10,
+            "a hard edge should visibly spread into the backdrop, got {spread}"
         );
     }
 
