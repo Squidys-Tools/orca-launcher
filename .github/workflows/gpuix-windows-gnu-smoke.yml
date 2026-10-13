@@ -94,30 +94,42 @@ jobs:
           "$MINGW_PREFIX/bin/node.exe" - <<'NODE'
           const { statSync } = require('node:fs')
           const native = require('./gpuix-native.win32-x64-gnu.node')
-          const binding = require('./')
+          const cjsBinding = require('./index.cjs')
           const nativeHasTestRenderer = typeof native.hasTestGpuixRenderer === 'function'
             ? native.hasTestGpuixRenderer()
             : native.hasTestGpuixRenderer
           if (nativeHasTestRenderer !== true) {
             throw new Error(`GNU addon lacks test-support; exports: ${Object.keys(native).join(', ')}`)
           }
-          const packageHasTestRenderer = typeof binding.hasTestGpuixRenderer === 'function'
-            ? binding.hasTestGpuixRenderer()
-            : binding.hasTestGpuixRenderer
-          if (packageHasTestRenderer !== true || typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
-            throw new Error(`Package entry did not load the GNU addon; exports: ${Object.keys(binding).join(', ')}`)
+          const testRendererAvailable = binding => typeof binding.hasTestGpuixRenderer === 'function'
+            ? binding.hasTestGpuixRenderer() === true
+            : binding.hasTestGpuixRenderer === true
+          const assertEntry = (name, binding) => {
+            if (!testRendererAvailable(binding) || typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
+              throw new Error(`${name} entry did not load the GNU addon; exports: ${Object.getOwnPropertyNames(binding).join(', ')}`)
+            }
           }
-          const renderer = new binding.TestGpuixRenderer(320, 200)
-          renderer.applyBatch(JSON.stringify([
-            ['createElement', 1, 'text'],
-            ['setText', 1, 'Windows GNU smoke'],
-            ['setRoot', 1],
-          ]))
-          renderer.flush()
-          renderer.captureScreenshot('windows-gnu-smoke.png')
-          if (renderer.getAllText()[0] !== 'Windows GNU smoke' || statSync('windows-gnu-smoke.png').size === 0) {
-            throw new Error('GPUix test renderer failed under MINGW Node')
-          }
+          assertEntry('CommonJS', cjsBinding)
+          import('./index.js').then(binding => {
+            assertEntry('ESM', binding)
+            if (binding.__napiBindingTarget !== 'native') {
+              throw new Error(`ESM entry loaded ${binding.__napiBindingTarget}, expected native`)
+            }
+            const renderer = new binding.TestGpuixRenderer(320, 200)
+            renderer.applyBatch(JSON.stringify([
+              ['createElement', 1, 'text'],
+              ['setText', 1, 'Windows GNU smoke'],
+              ['setRoot', 1],
+            ]))
+            renderer.flush()
+            renderer.captureScreenshot('windows-gnu-smoke.png')
+            if (renderer.getAllText()[0] !== 'Windows GNU smoke' || statSync('windows-gnu-smoke.png').size === 0) {
+              throw new Error('GPUix test renderer failed under MINGW Node')
+            }
+          }).catch(error => {
+            console.error(error)
+            process.exitCode = 1
+          })
           NODE
 
       - name: Verify and install the platform package
