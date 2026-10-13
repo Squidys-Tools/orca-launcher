@@ -36,9 +36,9 @@ use std::fmt;
 
 use windows::core::Error as Win32Error;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ, SRCCOPY,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,
+    HBITMAP, HDC, HGDIOBJ, SRCCOPY,
 };
 
 /// A captured rectangle of the screen, as tightly packed opaque BGRA.
@@ -197,6 +197,9 @@ pub fn capture_screen_region(
             SRCCOPY | CAPTUREBLT,
         ) {
             return Err(gdi("BitBlt", error));
+        }
+        if !GdiFlush().as_bool() {
+            return Err(gdi("GdiFlush", Win32Error::from_thread()));
         }
 
         if bits.is_null() {

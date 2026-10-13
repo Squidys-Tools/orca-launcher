@@ -53,6 +53,7 @@
 //! compile. The parameter deliberately shadows the outer `cx`.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gpui::prelude::*;
@@ -264,6 +265,8 @@ pub struct Launcher {
     pub backdrop: Option<Arc<RenderImage>>,
     /// Invalidates older background captures that finish after a newer request.
     pub backdrop_generation: u64,
+    /// Lets background capture tasks discard work when showing starts.
+    pub backdrop_visible: Arc<AtomicBool>,
     /// Requests a fresh sample after either the hotkey or Escape hides the window.
     pub on_hidden: Option<Arc<dyn Fn() + Send + Sync>>,
 
@@ -327,6 +330,7 @@ impl Launcher {
             theme: resolved,
             backdrop: None,
             backdrop_generation: 0,
+            backdrop_visible: Arc::new(AtomicBool::new(false)),
             on_hidden: None,
             engine,
             telemetry,
@@ -357,6 +361,12 @@ impl Launcher {
         }
         window.resize(size(bounds.size.width, px(target_height)));
         window.refresh();
+    }
+
+    /// Invalidates pending captures before a visibility transition.
+    pub fn set_backdrop_visible(&mut self, visible: bool) {
+        self.backdrop_generation = self.backdrop_generation.wrapping_add(1);
+        self.backdrop_visible.store(visible, Ordering::Release);
     }
 
     /// Re-resolves the theme against the window's current appearance.
@@ -448,6 +458,7 @@ impl Launcher {
         if let Some(hwnd) = self.hwnd {
             crate::win::set_shown(hwnd, false);
         }
+        self.set_backdrop_visible(false);
         if let Some(on_hidden) = &self.on_hidden {
             on_hidden();
         }

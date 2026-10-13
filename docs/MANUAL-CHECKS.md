@@ -226,8 +226,9 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
 ### 1f. The frame, and the frosted panel
 
 The panel is a translucent tint over a blurred screen capture. Captures happen
-before the first window exists and after each hide, never while the popup is
-visible; the next show reuses the last image.
+before the first window exists and after each hide, on the background executor.
+If the popup is shown while a capture is pending, that sample is discarded; the
+show path reuses the latest completed image without waiting.
 
 - [ ] Put a window full of text behind the launcher, then hide and reopen it.
       **Expected:** the text is visibly softened beneath the panel, while Orca's
@@ -266,8 +267,10 @@ visible; the next show reuses the last image.
       *fatal* icon load meant no tray at all — which on a resident app means no
       way to quit. If the icon is blank, say so and paste the `tray:` lines.
 - [ ] The startup log reports a capture from `startup region`, and each hide
-      reports one from `hidden window region`. There must be no capture log on
-      the show path.
+      reports one from `hidden window region`. If the popup is reopened before
+      a pending sample starts or finishes, the log may say the capture was
+      skipped because the popup is visible; the show path must not wait for or
+      initiate a capture.
 
 ## 2. Latency, now that the window is retained
 

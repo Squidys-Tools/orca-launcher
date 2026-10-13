@@ -472,10 +472,11 @@ which path the corners are taking.
 **Restored 2026-10-12 after comparing native and open-source alternatives.**
 The panel is translucent over a blurred screen capture again. The capture and
 blur run on `BackgroundExecutor`: once before a popup exists, then after each
-hide. The visible show path only reuses the last image, so the 20–50ms capture
-cost previously measured on that path no longer delays the hotkey. The tradeoff
-is deliberate staleness: the image represents the desktop at startup or hide
-time, not the instant the popup opens.
+hide. A visibility-generation check discards any pending sample if showing
+starts before it completes. The visible show path only reuses the last image,
+so the 20–50ms capture cost previously measured on that path no longer delays
+the hotkey. The tradeoff is deliberate staleness: the image represents the
+desktop at startup or hide time, not the instant the popup opens.
 
 **Why not a native Windows backdrop or a drop-in crate.** The official DWM
 `DwmEnableBlurBehindWindow` call has no blur effect on Windows 8 and later. The
@@ -496,11 +497,22 @@ backend, not adding a dependency. Whole-window helpers such as
 the rounded panel/shadow-margin mismatch and document Windows version/performance
 limitations. Those are larger and less reliable changes than this feature needs.
 
+[`GPUix`](https://github.com/remorses/gpuix) is also not a drop-in glass
+component. It is a TypeScript/React and Node binding to GPUI; its blurred-window
+[`example`](https://github.com/remorses/gpuix/blob/main/examples/blurred-window.tsx)
+sets `windowBackground: "blurred"`, and its README describes that option as
+macOS vibrancy. That is an OS-provided, window-level material, not a per-panel
+blur implementation for Windows. Using GPUix here would mean porting Orca's
+Rust UI and still would not provide the missing Windows backdrop sample; its
+current Windows CI targets MSVC, while Orca is pinned to GNU.
+
 The retained-window capture has two pieces: `orca_win::capture_screen_region`
 uses GDI `BitBlt` while the window is hidden, and the pure
 `orca_core::backdrop::soften` downsamples BGRA by four, box-blurs the reduced
-buffer, and lets the renderer bilinearly upscale it. The renderer-owned desktop
-is never sampled; GDI gives us the exact panel rectangle without consent UI, and
+buffer with alpha-weighted colors, and lets the renderer bilinearly upscale it.
+GDI's reserved `BI_RGB` byte is not a defined alpha channel, so capture marks the
+screen pixels opaque before the pure blur runs. The renderer-owned desktop is
+never sampled; GDI gives us the exact panel rectangle without consent UI, and
 the pure blur remains fully testable. A later hide capture uses the HWND's
 measured physical rectangle, so moving the pointer to another monitor does not
 move the sampled region. The initial sample uses the cursor monitor before any
@@ -512,6 +524,9 @@ Two old failure modes remain guarded because they are easy to reintroduce:
   right and bottom borders do not fade into a dark band.
 * GDI handles remember their origin and are released with the matching API;
   selected bitmaps are restored before their memory DC is deleted.
+
+The capture flushes the calling thread's GDI batch after `BitBlt` and before
+copying the DIB bits, so a queued blit cannot leave the sample stale or partial.
 
 The panel tint is translucent over the image, and the theme tests measure text
 contrast over both black and white backdrops. If a capture fails, the themed
@@ -567,7 +582,7 @@ transparent and `dim` stops clearing 4.5:1 over a light wallpaper.
 
 Everything painted *inside* the panel is layered over that tint rather than
 replacing it. The selection fill, footer pills and border are alpha-blended, so
-the tests composite each fill over the tinted panel and then over both backdrops.
+the contrast tests composite the panel and selection fills over both backdrops.
 A selection highlight does not sit directly on the desktop: testing it against
 the real compositing chain avoids scoring the fill against a surface the user
 never sees.

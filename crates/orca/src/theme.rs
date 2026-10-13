@@ -271,9 +271,9 @@ mod tests {
         // extreme backdrops and include the panel under every child fill.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             for (role, foreground, fill) in [
-                ("text on panel", theme.text, theme.background),
-                ("dim on panel", theme.dim, theme.background),
-                ("accent on panel", theme.accent, theme.background),
+                ("text on panel", theme.text, rgba_alpha(0x000000, 0.0)),
+                ("dim on panel", theme.dim, rgba_alpha(0x000000, 0.0)),
+                ("accent on panel", theme.accent, rgba_alpha(0x000000, 0.0)),
                 ("text on selection", theme.on_selection, theme.selection),
                 ("dim on selection", theme.dim, theme.selection),
             ] {

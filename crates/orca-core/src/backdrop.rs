@@ -93,6 +93,10 @@ pub fn soften(bgra: &[u8], width: u32, height: u32) -> Option<Softened> {
 
 /// Box-averages each [`DOWNSAMPLE`]×[`DOWNSAMPLE`] block into one pixel.
 ///
+/// RGB is alpha-weighted and converted back to straight color; alpha is
+/// averaged over covered pixels. Transparent RGB therefore cannot tint a
+/// neighboring visible pixel before the blur runs.
+///
 /// Edge blocks are averaged over whatever they actually cover rather than
 /// divided by the full block size, which is what makes the right and bottom
 /// edges a different brightness from the interior — a bright 1px line at the
@@ -110,13 +114,16 @@ fn downsample(bgra: &[u8], width: u32, height: u32) -> Softened {
             let x1 = (x0 + DOWNSAMPLE).min(width);
             let y1 = (y0 + DOWNSAMPLE).min(height);
 
-            let mut acc = [0u32; 4];
+            let mut color = [0u32; 3];
+            let mut alpha = 0u32;
             let mut count = 0u32;
             for y in y0..y1 {
                 for x in x0..x1 {
                     let base = ((y as usize) * (width as usize) + (x as usize)) * 4;
-                    for (channel, sum) in acc.iter_mut().enumerate() {
-                        *sum += u32::from(bgra[base + channel]);
+                    let pixel_alpha = u32::from(bgra[base + 3]);
+                    alpha += pixel_alpha;
+                    for (channel, sum) in color.iter_mut().enumerate() {
+                        *sum += u32::from(bgra[base + channel]) * pixel_alpha;
                     }
                     count += 1;
                 }
@@ -125,9 +132,10 @@ fn downsample(bgra: &[u8], width: u32, height: u32) -> Softened {
             // covers its own origin pixel.
             let count = count.max(1);
             let out_base = ((oy as usize) * (out_w as usize) + (ox as usize)) * 4;
-            for (channel, sum) in acc.iter().enumerate() {
-                out[out_base + channel] = (sum / count) as u8;
+            for (channel, sum) in color.iter().enumerate() {
+                out[out_base + channel] = sum.checked_div(alpha).unwrap_or(0) as u8;
             }
+            out[out_base + 3] = (alpha / count) as u8;
         }
     }
 
@@ -417,8 +425,9 @@ mod tests {
         // Sample the opaque side; it must not have picked up the black.
         for x in 0..out.width {
             let [r, g, b, _] = pixel_at(&out, x, 0);
-            assert!(
-                r > 200 && g > 200 && b > 200,
+            assert_eq!(
+                (r, g, b),
+                (255, 255, 255),
                 "opaque white was dragged toward transparent black at {x}: {r},{g},{b}"
             );
         }

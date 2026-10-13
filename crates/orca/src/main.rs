@@ -51,6 +51,7 @@ mod theme;
 mod ui;
 mod win;
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -484,6 +485,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         // The capture was prepared while the window was hidden, so showing is
         // reposition, paint, activate and nothing else.
         let shown = cx.update(|app| {
+            launcher.update(app, |launcher, _| launcher.set_backdrop_visible(true));
             let outcome = window.update(app, |_, window, cx| {
                 place_on_cursor(window, cx);
                 // No frame is requested by the visibility callback GPUI sends
@@ -538,6 +540,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
             // the window is really being retained.
             cx.update(|app| {
                 launcher.update(app, |launcher, _| {
+                    launcher.set_backdrop_visible(false);
                     launcher.forget_window();
                     launcher.shown = false;
                 });
@@ -570,6 +573,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     });
     // Building the window is the only work left on the first open.
     let create = cx.update(|app| {
+        launcher.update(app, |launcher, _| launcher.set_backdrop_visible(true));
         let entity = launcher.clone();
         let bounds = first_bounds;
 
@@ -642,7 +646,10 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         Err(error) => {
             log(&format!("popup: open failed: {error:?}"));
             cx.update(|app| {
-                launcher.update(app, |launcher, _| launcher.shown = false);
+                launcher.update(app, |launcher, _| {
+                    launcher.set_backdrop_visible(false);
+                    launcher.shown = false;
+                });
             });
         }
     }
@@ -741,34 +748,53 @@ fn prewarm_backdrop(launcher: &Entity<Launcher>, target: BackdropTarget, cx: &mu
         BackdropTarget::PredictedWindow(_, _) => "startup region",
         BackdropTarget::HiddenWindow(_) => "hidden window region",
     };
+    let visible = cx.update(|app| launcher.read(app).backdrop_visible.clone());
     let capture = cx.background_executor().spawn(async move {
-        match target {
+        if visible.load(Ordering::Acquire) {
+            return None;
+        }
+        let backdrop = match target {
             BackdropTarget::PredictedWindow(bounds, scale) => {
                 crate::backdrop::capture(bounds, scale)
             }
             BackdropTarget::HiddenWindow(rect) => crate::backdrop::capture_hidden_window(rect),
+        };
+        if visible.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(backdrop)
         }
     });
     let launcher = launcher.clone();
     cx.spawn(async move |cx| {
-        let backdrop = capture.await;
-        log(&format!(
-            "backdrop: {} in {:.1} ms from {target_name}",
-            if backdrop.image.is_some() {
-                "captured and blurred"
-            } else {
-                "unavailable, using the tinted panel fallback"
-            },
-            backdrop.took_ms,
-        ));
-        cx.update(|app| {
+        let Some(backdrop) = capture.await else {
+            log("backdrop: capture skipped because the popup is visible");
+            return;
+        };
+        let captured = backdrop.image.is_some();
+        let took_ms = backdrop.took_ms;
+        let installed = cx.update(|app| {
             launcher.update(app, |launcher, cx| {
-                if launcher.backdrop_generation == generation {
-                    launcher.backdrop = backdrop.image;
-                    cx.notify();
+                if launcher.backdrop_generation != generation {
+                    return false;
                 }
+                launcher.backdrop = backdrop.image;
+                cx.notify();
+                true
             })
         });
+        if installed {
+            log(&format!(
+                "backdrop: {} in {took_ms:.1} ms from {target_name}",
+                if captured {
+                    "captured and blurred"
+                } else {
+                    "unavailable, using the tinted panel fallback"
+                },
+            ));
+        } else {
+            log("backdrop: stale capture discarded after a newer request");
+        }
     })
     .detach();
 }
