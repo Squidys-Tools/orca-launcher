@@ -505,19 +505,18 @@ macOS vibrancy. That is an OS-provided, window-level material, not a per-panel
 blur implementation for Windows. Using GPUix here would mean porting Orca's
 Rust UI and still would not provide the missing Windows backdrop sample. Its
 native package currently targets Windows MSVC, while Orca is pinned to GNU.
-There is a GNU escape hatch: [NAPI-RS accepts the x64 Windows GNU target]
-(https://napi.rs/docs/cross-build), and a debug build of GPUix's actual native
-crate succeeded for that target using MinGW and MSYS2's `libnode.dll`. This is
-not a shippable validation: the debug addon was 637 MB, and it was not loaded
-under Windows. The published GPUix target list and CI still exclude Windows
-GNU; adding it also needs packaging fixes, because NAPI-RS CLI 3.10.4 generates
-the Windows GNU package with `libc: ["glibc"]`, which npm rejects on Windows.
-The release GPUI build invokes `fxc.exe` from the Windows SDK, so that build
-must run on Windows (for example, CI with MinGW Node and the SDK), not this
-Linux cross-build host. MSYS2 does ship a [MINGW Node runtime]
-(https://packages.msys2.org/packages/mingw-w64-x86_64-nodejs), but using this
-route means maintaining its runtime dependencies and a custom package pipeline;
-Bun remains best-effort for N-API.
+There is a GNU escape hatch: [NAPI-RS accepts the x64 Windows GNU target](https://napi.rs/docs/cross-build),
+and a debug build of GPUix's actual native crate succeeded for that target using
+MinGW and MSYS2's `libnode.dll`. This is not a shippable validation: the debug
+addon was 637 MB, and it was not loaded under Windows. The published GPUix
+target list and CI still exclude Windows GNU; adding it also needs packaging
+fixes, because NAPI-RS CLI 3.10.4 generates the Windows GNU package with
+`libc: ["glibc"]`, which npm rejects on Windows. The release GPUI build invokes
+`fxc.exe` from the Windows SDK, so that build must run on Windows (for example,
+CI with MinGW Node and the SDK), not this Linux cross-build host. MSYS2 does
+ship a [MINGW Node runtime](https://packages.msys2.org/packages/mingw-w64-x86_64-nodejs),
+but using this route means maintaining its runtime dependencies and a custom
+package pipeline; Bun remains best-effort for N-API.
 
 The retained-window capture has two pieces: `orca_win::capture_screen_region`
 uses GDI `BitBlt` while the window is hidden, and the pure
