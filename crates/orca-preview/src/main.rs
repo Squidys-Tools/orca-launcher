@@ -19,6 +19,7 @@ mod launch {
 mod win {
     pub type Hwnd = ();
 
+    pub fn set_bounds(_: Hwnd, _: f32, _: f32, _: f32, _: f32) {}
     pub fn set_shown(_: Hwnd, _: bool) {}
 }
 
@@ -54,7 +55,12 @@ fn main() {
         ]);
 
         let telemetry = Arc::new(Telemetry::default());
-        let launcher = cx.new(|cx| Launcher::new(cx, Arc::clone(&engine), telemetry));
+        let launcher = cx.new(|cx| {
+            let mut launcher = Launcher::new(cx, Arc::clone(&engine), telemetry);
+            launcher.query = "a".to_owned();
+            launcher.caret = launcher.query.len();
+            launcher
+        });
         let focus = launcher.read(cx).focus.clone();
         let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let root = launcher.clone();

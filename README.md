@@ -4,10 +4,10 @@ A Windows launcher. Windows-only, built with the GNU Rust toolchain.
 
 ## Status
 
-**The launcher runs.** <kbd>Ctrl+Shift+Space</kbd> opens a rounded panel over
-the desktop, typing ranks the results, <kbd>Enter</kbd> opens the selected one,
-<kbd>Esc</kbd> hides the panel without exiting. It lives in the tray between
-uses and can be started at login.
+**The launcher runs.** <kbd>Ctrl+Shift+Space</kbd> opens a compact search bar
+over the desktop; typing expands it into ranked results, <kbd>Enter</kbd> opens
+the selected one, and <kbd>Esc</kbd> hides it without exiting. It lives in the
+tray between uses and can be started at login.
 
 Working today:
 

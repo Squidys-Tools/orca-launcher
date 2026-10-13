@@ -121,7 +121,7 @@ pub const FRAME_MARGIN: f32 = 32.0;
 
 /// The window's width: the panel plus [`FRAME_MARGIN`] on both sides.
 pub const WINDOW_WIDTH: f32 = POPUP_WIDTH + FRAME_MARGIN * 2.0;
-/// The window's height: the panel plus [`FRAME_MARGIN`] top and bottom.
+/// The expanded window's height: the panel plus [`FRAME_MARGIN`] top and bottom.
 pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT + FRAME_MARGIN * 2.0;
 
 /// The panel's corner radius.
@@ -131,11 +131,13 @@ pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT + FRAME_MARGIN * 2.0;
 /// not look like they are competing with it.
 const PANEL_RADIUS: f32 = 18.0;
 
-/// One row of the result list.
-const ROW_HEIGHT: f32 = 40.0;
 /// The search field's height. Taller than a row so the query reads as the
 /// panel's subject rather than as another list item.
 const SEARCH_HEIGHT: f32 = 64.0;
+/// The window height while the query is empty: the search bar plus its shadow margin.
+pub const WINDOW_COMPACT_HEIGHT: f32 = SEARCH_HEIGHT + FRAME_MARGIN * 2.0;
+/// One row of the result list.
+const ROW_HEIGHT: f32 = 40.0;
 /// The status bar's height.
 const STATUS_HEIGHT: f32 = 44.0;
 /// Height of a footer pill, and of the keycap inside it.
@@ -321,7 +323,7 @@ impl Launcher {
         }
     }
 
-    /// Clears the query and returns to the top of the list.
+    /// Clears the query and returns to the compact idle bar.
     ///
     /// Called on every show, so reopening the popup never shows the previous
     /// query's results with an empty bar above them.
@@ -330,6 +332,30 @@ impl Launcher {
         self.caret = 0;
         self.composing = None;
         self.selected = 0;
+    }
+
+    fn resize_for_query(&self, window: &mut Window) {
+        let Some(hwnd) = self.hwnd else {
+            return;
+        };
+        let target_height = if self.query.is_empty() {
+            WINDOW_COMPACT_HEIGHT
+        } else {
+            WINDOW_HEIGHT
+        };
+        let bounds = window.bounds();
+        let current_height = bounds.size.height.as_f32();
+        if (current_height - target_height).abs() < 0.5 {
+            return;
+        }
+        crate::win::set_bounds(
+            hwnd,
+            bounds.origin.x.as_f32(),
+            bounds.origin.y.as_f32() + (current_height - target_height) / 2.0,
+            bounds.size.width.as_f32(),
+            target_height,
+        );
+        window.refresh();
     }
 
     /// Re-resolves the theme against the window's current appearance.
@@ -503,7 +529,7 @@ impl EntityInputHandler for Launcher {
         &mut self,
         range: Option<Range<usize>>,
         new_text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // The transition itself is in `crate::text` because that is where it can
@@ -519,6 +545,7 @@ impl EntityInputHandler for Launcher {
         self.caret = edit.caret;
         self.composing = edit.composing;
         request_search(self, cx);
+        self.resize_for_query(window);
     }
 
     fn replace_and_mark_text_in_range(
@@ -526,7 +553,7 @@ impl EntityInputHandler for Launcher {
         range: Option<Range<usize>>,
         new_text: &str,
         new_sel: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let edit = text::apply_and_mark(
@@ -544,6 +571,7 @@ impl EntityInputHandler for Launcher {
         // backspace it away — and a list that refilters on every intermediate
         // composition step is the flicker that makes an IME feel broken.
         cx.notify();
+        self.resize_for_query(window);
     }
 
     fn bounds_for_range(
@@ -876,12 +904,12 @@ impl LauncherView {
         self.move_caret(CaretMove::Right, cx);
     }
 
-    fn on_backspace(&mut self, _: &DeleteBack, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete(false, cx);
+    fn on_backspace(&mut self, _: &DeleteBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete(false, window, cx);
     }
 
-    fn on_delete(&mut self, _: &DeleteForward, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete(true, cx);
+    fn on_delete(&mut self, _: &DeleteForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete(true, window, cx);
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -898,7 +926,7 @@ impl LauncherView {
         });
     }
 
-    fn delete(&mut self, forward: bool, cx: &mut Context<Self>) {
+    fn delete(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.launcher.update(cx, |launcher, cx| {
             if forward {
                 launcher.delete_forward();
@@ -907,6 +935,7 @@ impl LauncherView {
             }
             launcher.caret = text::clamp_boundary(&launcher.query, launcher.caret);
             request_search(launcher, cx);
+            launcher.resize_for_query(window);
         });
     }
 }
@@ -925,6 +954,7 @@ impl Render for LauncherView {
             .update(cx, |launcher, _| launcher.refresh_theme(window));
 
         let theme = self.launcher.read(cx).theme;
+        let query_empty = self.launcher.read(cx).query.is_empty();
         let composing = self.launcher.read(cx).composing.is_some();
         let rows = self.launcher.read(cx).rows.clone();
         let selected = self.launcher.read(cx).selected;
@@ -980,10 +1010,13 @@ impl Render for LauncherView {
                     // list paints square corners over the rounded ones.
                     .overflow_hidden()
                     .child(self.search_field(theme, &focus, entity, telemetry))
-                    .child(self.result_list(&rows, selected, theme, searching, error))
-                    .child(Self::status_bar(
-                        status, latency, composing, error, open, theme,
-                    )),
+                    .when(!query_empty, |panel| {
+                        panel
+                            .child(self.result_list(&rows, selected, theme, searching, error))
+                            .child(Self::status_bar(
+                                status, latency, composing, error, open, theme,
+                            ))
+                    }),
             )
     }
 }
@@ -1231,7 +1264,8 @@ impl LauncherView {
     }
 }
 
-/// Starts a background search for the current query.
+/// Starts a background search for a non-empty query, or clears the result state
+/// when the query is empty.
 ///
 /// The only place results are produced. `render` never ranks, never collects,
 /// and never touches a file.
@@ -1243,6 +1277,15 @@ impl LauncherView {
 pub fn request_search(launcher: &mut Launcher, cx: &mut Context<Launcher>) {
     let query = launcher.query.clone();
     let generation = launcher.generation.next();
+    if query.is_empty() {
+        launcher.rows.clear();
+        launcher.matches = 0;
+        launcher.searching = false;
+        launcher.error = None;
+        launcher.selected = 0;
+        cx.notify();
+        return;
+    }
     launcher.searching = true;
     let engine = Arc::clone(&launcher.engine);
     let weak = cx.weak_entity();

@@ -38,10 +38,12 @@ On a Linux machine with a graphical session, run:
 
 This opens the production `ui.rs` view with sample command results. Search and
 selection are live; activating a result is deliberately a no-op and closes the
-preview. Check layout, colors, text, row selection, and footer spacing on the
-screen. The preview uses a normal opaque Linux window, so its decorations,
-transparency, focus behavior, and text input are not evidence about Windows.
-The Windows launcher and its Win32 integrations still need the checks below.
+preview. It starts with a sample query so the expanded result layout is visible.
+Check layout, colors, text, row selection, and footer spacing on the screen.
+The preview uses a normal opaque Linux window and does not simulate Windows
+window resizing, so its decorations, transparency, focus behavior, text input,
+and compact-to-expanded sizing are not evidence about Windows. The Windows
+launcher and its Win32 integrations still need the checks below.
 
 > If the build prints no `Compiling` lines and finishes instantly, nothing was
 > rebuilt and the binary may be stale. That is a bug, not a fast build — say so
@@ -62,6 +64,23 @@ or the history database all missing. If one of those is the *only* way to reach
 the popup, that is a bug.
 
 ## 1. The retained window — the highest-risk thing in this change
+
+### Compact default and expand-on-query
+
+1. Press the hotkey from another app.
+   **Expected:** a focused search bar appears with no result list or status
+   footer; the outer window is about 128 logical pixels high.
+2. Type a query.
+   **Expected:** the window expands around the same center to show the existing
+   results and footer. The field keeps focus while the list appears.
+3. Delete the whole query.
+   **Expected:** results and footer disappear and the window shrinks back to the
+   search bar. No old results remain behind it.
+4. Press <kbd>Esc</kbd>, then the hotkey again.
+   **Expected:** the launcher reopens in the compact state.
+
+This check belongs on Windows: the Linux preview shares the UI content but does
+not fake the platform window resize.
 
 ### 1a. Reopening after Esc — please read the log, not just the screen
 
@@ -138,9 +157,8 @@ launcher was dead until you restarted it. Both paths now go through one
    requests *no frame*. Without an explicit `Window::refresh()` a re-shown popup
    sits on screen showing its last frame. So: type `note`, let the list fill,
    press <kbd>Esc</kbd>, press <kbd>Ctrl+Alt+Space</kbd>.
-   **Expected:** the query bar is empty and the list is back to the empty-query
-   state, painted correctly. If you see the *previous* query and stale results,
-   `refresh()` has stopped being called and that is the bug.
+   **Expected:** the compact search bar is empty and painted correctly. If the
+   previous query or results reappear, `refresh()` or the reset path is broken.
 
 ### 1b. Enter launches and then still leaves a usable popup
 
@@ -333,8 +351,10 @@ structural property (there is no code path from `render` to the filesystem) but
 "the popup appears promptly" is a timing observation.
 
 - [ ] From a cold start, hotkey immediately. **Expected:** the popup paints and
-      takes focus in well under a second, with the status line reading
-      `searching...`, and rows appear afterwards. If the popup is *blank* or
+      takes focus in well under a second as a compact search bar. No catalogue
+      search should run until the query is non-empty.
+- [ ] Type a query. **Expected:** the panel expands immediately, the status line
+      reads `searching...`, and rows appear afterwards. If the popup is blank or
       unresponsive until results land, something is on the UI thread that should
       not be — check `request_search` in `ui.rs`.
 - [ ] On a machine with a large `C:\Users`, time hotkey → first painted pixel.
@@ -391,7 +411,7 @@ it because the conversion depends on the real display configuration.
       **Expected:** the popup lands on a monitor that exists. It is repositioned
       on every show for exactly this reason; if it appears offscreen, that
       reposition is not running.
-- [ ] Check the popup is exactly 640 logical px wide.
+- [ ] Check the panel is exactly 660 logical px wide.
 
 ## 8. `orca-win` platform calls
 
@@ -400,10 +420,11 @@ Windows does the thing.
 
 - [ ] Bind a hotkey (`Ctrl+Shift+Space`): press it from another app, confirm the
   handler runs, then unbind and confirm the combination is free again.
-- [ ] **<kbd>Ctrl</kbd>+<kbd>Esc</kbd> quits the process.** This exists because
-  the tray is the only other quit path and it is broken. Open the popup, press
-  Ctrl+Esc, and confirm the process exits rather than just hiding. Also confirm
-  the popup does not leave a stale window on screen on the way out.
+- [ ] **<kbd>Ctrl</kbd>+<kbd>Esc</kbd> quits the process.** This is the existing
+  keyboard fallback while the tray entry remains the intended exit path. Open
+  the popup, press Ctrl+Esc, and confirm the process exits rather than just
+  hiding. Also confirm the popup does not leave a stale window on screen on the
+  way out.
 - [ ] **The tray icon.** It has been broken and is now fixed but unverified. Look
   for an orca icon in the notification area (may need the `^` overflow chevron).
   - The line `tray icon unavailable: tray message window could not be created

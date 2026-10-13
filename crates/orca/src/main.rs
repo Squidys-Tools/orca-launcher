@@ -70,7 +70,9 @@ use orca_win::{
 
 use crate::catalog::{Catalog, Engine};
 use crate::providers::StdFsDirectory;
-use crate::ui::{HideAction, Launcher, LauncherView, Telemetry, WINDOW_HEIGHT, WINDOW_WIDTH};
+use crate::ui::{
+    HideAction, Launcher, LauncherView, Telemetry, WINDOW_COMPACT_HEIGHT, WINDOW_WIDTH,
+};
 
 /// Tray command: show the popup.
 const TRAY_SHOW: &str = "show";
@@ -445,8 +447,8 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
 
     if let Some((window, focus)) = existing {
         // The retained path: the window already exists, so this is a show, not a
-        // construction. Repositioned first, because a monitor may have been
-        // unplugged while the popup was hidden.
+        // construction. Repositioned and collapsed first, because a monitor may
+        // have been unplugged while the popup was hidden.
         //
         // Nothing here touches the frame's contents. The panel is an opaque
         // fill painted from the palette, so a show is reposition, paint,
@@ -534,7 +536,11 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     let focus = cx.update(|app| launcher.read(app).focus.clone());
     let first_bounds = cx.update(|app| {
         let display = win::display_under_cursor(app);
-        Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app)
+        Bounds::centered(
+            display,
+            size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
+            app,
+        )
     });
     // Building the window is the only work left on the first open.
     let create = cx.update(|app| {
@@ -700,16 +706,26 @@ fn spawn_command_pump(
         .ok();
 }
 
-/// Moves the popup to the cursor's monitor, centred in its work area.
+/// Moves and collapses the popup to the cursor's monitor, centred in its work area.
 ///
 /// A no-op if the `HWND` is unavailable, which leaves the window where the
 /// platform put it — the right failure, because a window at the wrong position
 /// is recoverable and one that was never placed is not.
 fn place_on_cursor(window: &mut Window, app: &App) {
     let display = win::display_under_cursor(app);
-    let target = Bounds::centered(display, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), app);
+    let target = Bounds::centered(
+        display,
+        size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
+        app,
+    );
     if let Some(hwnd) = win::hwnd(window) {
-        win::move_to(hwnd, target.origin.x.as_f32(), target.origin.y.as_f32());
+        win::set_bounds(
+            hwnd,
+            target.origin.x.as_f32(),
+            target.origin.y.as_f32(),
+            target.size.width.as_f32(),
+            target.size.height.as_f32(),
+        );
     }
 }
 
@@ -735,11 +751,11 @@ mod tests {
     use orca_win::{Hotkey, HotkeyParseError, Key, Modifiers};
     use std::sync::{Arc, Mutex};
 
-    use super::{build_engine, spawn_command_pump, UiCommand, WINDOW_HEIGHT, WINDOW_WIDTH};
+    use super::{build_engine, spawn_command_pump, UiCommand, WINDOW_COMPACT_HEIGHT, WINDOW_WIDTH};
     // The panel dimensions and the margin are not used outside this module, so
     // they are imported here rather than at the crate root where they would be
     // dead code in the binary.
-    use crate::ui::{FRAME_MARGIN, POPUP_HEIGHT, POPUP_WIDTH};
+    use crate::ui::{FRAME_MARGIN, POPUP_HEIGHT, POPUP_WIDTH, WINDOW_HEIGHT};
 
     #[test]
     fn the_command_pump_keeps_draining_across_a_long_idle_period() {
@@ -947,6 +963,7 @@ mod tests {
         assert_eq!(POPUP_WIDTH, 660.0);
         assert_eq!(WINDOW_WIDTH, POPUP_WIDTH + FRAME_MARGIN * 2.0);
         assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT + FRAME_MARGIN * 2.0);
+        assert_eq!(WINDOW_COMPACT_HEIGHT, 128.0);
     }
 
     /// The tightest display the launcher claims to work on: a 1366×768 laptop
@@ -970,6 +987,11 @@ mod tests {
             WINDOW_HEIGHT <= height,
             "the window is {WINDOW_HEIGHT} logical px tall, more than the {height} \
              available on a 768-tall display at 150% scaling"
+        );
+        assert!(
+            WINDOW_COMPACT_HEIGHT <= height,
+            "the compact window is {WINDOW_COMPACT_HEIGHT} logical px tall, more than the \
+             {height} available on a 768-tall display at 150% scaling"
         );
     }
 }

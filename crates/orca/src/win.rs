@@ -445,18 +445,28 @@ pub fn raise(hwnd: HWND) {
     }
 }
 
-/// Moves a window to a top-left position given in GPUI logical pixels.
-///
-/// Leaves size, z-order and activation alone; `SWP_NOSIZE`/`SWP_NOZORDER`/
-/// `SWP_NOACTIVATE` are the point. `SWP_NOOWNERZORDER` keeps a popup from
-/// dragging its owner forward with it.
-pub fn move_to(hwnd: HWND, x: f32, y: f32) {
-    let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-    // SAFETY: as above. `SetWindowPos` with `SWP_NOSIZE` cannot change the
-    // window's size, and a failure here leaves the window where it was, which
-    // the caller treats as "keep the old position".
-    unsafe {
-        let _ = SetWindowPos(hwnd, None, x.round() as i32, y.round() as i32, 0, 0, flags);
+/// Sets a window's bounds in GPUI logical pixels without changing its z-order
+/// or activation state.
+pub fn set_bounds(hwnd: HWND, x: f32, y: f32, width: f32, height: f32) {
+    let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    // SAFETY: `hwnd` is a live window this process owns. The dimensions are
+    // positive logical sizes supplied by the launcher, and the flags preserve
+    // the popup's current z-order and activation state.
+    if let Err(error) = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x.round() as i32,
+            y.round() as i32,
+            width.round() as i32,
+            height.round() as i32,
+            flags,
+        )
+    } {
+        crate::log(&format!(
+            "popup: SetWindowPos failed while setting {width:.0}x{height:.0} bounds (Win32 error {})",
+            error.code().0
+        ));
     }
 }
 
