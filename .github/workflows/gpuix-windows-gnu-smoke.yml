@@ -48,6 +48,7 @@ jobs:
           ref: 6a5c7c142ac32f9eb0caefe0121be995cfc18631
           path: gpuix
           submodules: recursive
+          persist-credentials: false
 
       - name: Install the GNU Rust toolchain
         run: |
