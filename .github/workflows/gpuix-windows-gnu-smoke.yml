@@ -60,13 +60,12 @@ jobs:
           test -f "$MINGW_PREFIX/lib/libnode.dll.a"
           "$MINGW_PREFIX/bin/node.exe" -e 'const v=process.config?.variables ?? {}; if (process.platform !== "win32" || process.arch !== "x64" || v.shlib_suffix !== "dll.a") throw new Error(`Expected MSYS2 MINGW x64 Node, got ${process.execPath}: ${JSON.stringify(v)}`)'
 
-      - name: Cache GPUix build output
-        uses: actions/cache@v4
+      - name: Restore GPUix build output
+        uses: actions/cache/restore@v4
         with:
           path: gpuix/packages/native/target
           key: ${{ runner.os }}-gpuix-windows-gnu-${{ hashFiles('gpuix/packages/native/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-gpuix-windows-gnu-
-          save-always: true
 
       - name: Configure the smoke target
         working-directory: gpuix/packages/native
@@ -160,3 +159,10 @@ jobs:
           cd "$consumer_dir"
           npm install --ignore-scripts --no-audit --no-fund "$pack_dir/$tarball"
           node -e "const binding = require('@gpuix/native-win32-x64-gnu'); if (typeof binding.GpuixRenderer !== 'function') throw new Error('Installed GNU package did not load')"
+
+      - name: Save GPUix build output
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: gpuix/packages/native/target
+          key: ${{ runner.os }}-gpuix-windows-gnu-${{ hashFiles('gpuix/packages/native/Cargo.lock') }}
