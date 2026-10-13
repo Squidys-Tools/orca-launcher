@@ -85,7 +85,8 @@ jobs:
         working-directory: gpuix/packages/native
         run: |
           export LIBNODE_PATH="$(cygpath -w "$MINGW_PREFIX/bin")"
-          bunx @napi-rs/cli@3.10.4 build --platform --release --features test-support --target x86_64-pc-windows-gnu
+          bunx @napi-rs/cli@3.10.4 build --platform --esm --js index.js --release --features test-support --target x86_64-pc-windows-gnu
+          bunx @napi-rs/cli@3.10.4 build --platform --js index.cjs --release --features test-support --target x86_64-pc-windows-gnu
           test -f gpuix-native.win32-x64-gnu.node
 
       - name: Load and exercise the addon under MINGW Node
