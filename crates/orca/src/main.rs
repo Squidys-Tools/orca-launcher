@@ -719,14 +719,9 @@ fn place_on_cursor(window: &mut Window, app: &App) {
         app,
     );
     if let Some(hwnd) = win::hwnd(window) {
-        win::set_bounds(
-            hwnd,
-            target.origin.x.as_f32(),
-            target.origin.y.as_f32(),
-            target.size.width.as_f32(),
-            target.size.height.as_f32(),
-        );
+        win::move_to(hwnd, target.origin.x.as_f32(), target.origin.y.as_f32());
     }
+    window.resize(size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)));
 }
 
 #[cfg(test)]

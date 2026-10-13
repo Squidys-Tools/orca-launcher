@@ -71,13 +71,16 @@ the popup, that is a bug.
    **Expected:** a focused search bar appears with no result list or status
    footer; the outer window is about 128 logical pixels high.
 2. Type a query.
-   **Expected:** the window expands around the same center to show the existing
+   **Expected:** the window grows below the search bar to show the existing
    results and footer. The field keeps focus while the list appears.
 3. Delete the whole query.
    **Expected:** results and footer disappear and the window shrinks back to the
    search bar. No old results remain behind it.
 4. Press <kbd>Esc</kbd>, then the hotkey again.
    **Expected:** the launcher reopens in the compact state.
+5. If a display with scaling above 100% is available, repeat the expand/clear
+   steps there.
+   **Expected:** the panel and its contents remain fully visible at that scale.
 
 This check belongs on Windows: the Linux preview shares the UI content but does
 not fake the platform window resize.

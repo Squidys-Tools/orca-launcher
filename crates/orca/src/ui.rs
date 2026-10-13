@@ -335,9 +335,6 @@ impl Launcher {
     }
 
     fn resize_for_query(&self, window: &mut Window) {
-        let Some(hwnd) = self.hwnd else {
-            return;
-        };
         let target_height = if self.query.is_empty() {
             WINDOW_COMPACT_HEIGHT
         } else {
@@ -348,13 +345,7 @@ impl Launcher {
         if (current_height - target_height).abs() < 0.5 {
             return;
         }
-        crate::win::set_bounds(
-            hwnd,
-            bounds.origin.x.as_f32(),
-            bounds.origin.y.as_f32() + (current_height - target_height) / 2.0,
-            bounds.size.width.as_f32(),
-            target_height,
-        );
+        window.resize(size(bounds.size.width, px(target_height)));
         window.refresh();
     }
 
