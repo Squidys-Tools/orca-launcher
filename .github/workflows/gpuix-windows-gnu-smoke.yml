@@ -58,7 +58,7 @@ jobs:
           rustc --version --verbose
           test -f "$MINGW_PREFIX/bin/libnode.dll"
           test -f "$MINGW_PREFIX/lib/libnode.dll.a"
-          node -e 'const v=process.config?.variables ?? {}; if (v.shlib_suffix !== "dll.a" && v.node_target_type !== "shared_library") throw new Error(`Expected MSYS2 MINGW Node, got ${JSON.stringify(v)}`)'
+          "$MINGW_PREFIX/bin/node.exe" -e 'const v=process.config?.variables ?? {}; if (process.platform !== "win32" || process.arch !== "x64" || v.shlib_suffix !== "dll.a") throw new Error(`Expected MSYS2 MINGW x64 Node, got ${process.execPath}: ${JSON.stringify(v)}`)'
 
       - name: Cache GPUix build output
         uses: actions/cache@v4
@@ -91,14 +91,21 @@ jobs:
       - name: Load and exercise the addon under MINGW Node
         working-directory: gpuix/packages/native
         run: |
-          node - <<'NODE'
+          "$MINGW_PREFIX/bin/node.exe" - <<'NODE'
           const { statSync } = require('node:fs')
+          const native = require('./gpuix-native.win32-x64-gnu.node')
           const binding = require('./')
-          if (typeof binding.hasTestGpuixRenderer !== 'function' || !binding.hasTestGpuixRenderer()) {
-            throw new Error('GPUix test renderer was not compiled into the GNU addon')
+          const nativeHasTestRenderer = typeof native.hasTestGpuixRenderer === 'function'
+            ? native.hasTestGpuixRenderer()
+            : native.hasTestGpuixRenderer
+          if (nativeHasTestRenderer !== true) {
+            throw new Error(`GNU addon lacks test-support; exports: ${Object.keys(native).join(', ')}`)
           }
-          if (typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
-            throw new Error('GPUix renderer exports were not loaded')
+          const packageHasTestRenderer = typeof binding.hasTestGpuixRenderer === 'function'
+            ? binding.hasTestGpuixRenderer()
+            : binding.hasTestGpuixRenderer
+          if (packageHasTestRenderer !== true || typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
+            throw new Error(`Package entry did not load the GNU addon; exports: ${Object.keys(binding).join(', ')}`)
           }
           const renderer = new binding.TestGpuixRenderer(320, 200)
           renderer.applyBatch(JSON.stringify([
@@ -116,6 +123,7 @@ jobs:
       - name: Verify and install the platform package
         working-directory: gpuix/packages/native
         run: |
+          export PATH="$MINGW_PREFIX/bin:$PATH"
           bunx @napi-rs/cli@3.10.4 create-npm-dirs
           bunx @napi-rs/cli@3.10.4 pre-publish --tag-style npm --no-gh-release --skip-optional-publish
           node - <<'NODE'
