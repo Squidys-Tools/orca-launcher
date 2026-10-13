@@ -535,7 +535,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     // closure would leave it out of scope for the activation that follows.
     let focus = cx.update(|app| launcher.read(app).focus.clone());
     let first_bounds = cx.update(|app| {
-        let display = win::display_under_cursor(app);
+        let (display, _) = win::display_under_cursor(app);
         Bounds::centered(
             display,
             size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
@@ -712,14 +712,19 @@ fn spawn_command_pump(
 /// platform put it — the right failure, because a window at the wrong position
 /// is recoverable and one that was never placed is not.
 fn place_on_cursor(window: &mut Window, app: &App) {
-    let display = win::display_under_cursor(app);
+    let (display, scale_factor) = win::display_under_cursor(app);
     let target = Bounds::centered(
         display,
         size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)),
         app,
     );
     if let Some(hwnd) = win::hwnd(window) {
-        win::move_to(hwnd, target.origin.x.as_f32(), target.origin.y.as_f32());
+        win::move_to(
+            hwnd,
+            target.origin.x.as_f32(),
+            target.origin.y.as_f32(),
+            scale_factor,
+        );
     }
     window.resize(size(px(WINDOW_WIDTH), px(WINDOW_COMPACT_HEIGHT)));
 }

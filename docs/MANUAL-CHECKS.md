@@ -71,7 +71,7 @@ the popup, that is a bug.
    **Expected:** a focused search bar appears with no result list or status
    footer; the outer window is about 128 logical pixels high.
 2. Type a query.
-   **Expected:** the window grows below the search bar to show the existing
+   **Expected:** the window expands around its center to show the existing
    results and footer. The field keeps focus while the list appears.
 3. Delete the whole query.
    **Expected:** results and footer disappear and the window shrinks back to the

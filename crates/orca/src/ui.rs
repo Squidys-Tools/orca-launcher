@@ -345,6 +345,14 @@ impl Launcher {
         if (current_height - target_height).abs() < 0.5 {
             return;
         }
+        if let Some(hwnd) = self.hwnd {
+            crate::win::move_to(
+                hwnd,
+                bounds.origin.x.as_f32(),
+                bounds.origin.y.as_f32() + (current_height - target_height) / 2.0,
+                window.scale_factor(),
+            );
+        }
         window.resize(size(bounds.size.width, px(target_height)));
         window.refresh();
     }
