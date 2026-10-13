@@ -109,6 +109,9 @@ jobs:
             if (!testRendererAvailable(binding) || typeof binding.TestGpuixRenderer !== 'function' || typeof binding.GpuixRenderer !== 'function') {
               throw new Error(`${name} entry did not load the GNU addon; exports: ${Object.getOwnPropertyNames(binding).join(', ')}`)
             }
+            if (binding.TestGpuixRenderer !== native.TestGpuixRenderer || binding.GpuixRenderer !== native.GpuixRenderer) {
+              throw new Error(`${name} entry resolved a different native binary than the exact GNU addon`)
+            }
           }
           assertEntry('CommonJS', cjsBinding)
           import('./index.js').then(binding => {
