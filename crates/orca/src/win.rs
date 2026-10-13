@@ -13,7 +13,7 @@
 //! | [`hwnd`] | a way to reach a GPUI window's `HWND` | hide/show and reposition need it, and nothing in GPUI's public API yields it |
 //! | [`set_shown`] | `Window::hide` / `Window::show` | the persistent-window design; see below |
 //! | [`move_to`] | `Window::set_position` | a retained window must follow the cursor to another monitor |
-//! | [`logical_cursor`] | a cursor-position read | "centre on the cursor's monitor" is the placement rule |
+//! | [`display_under_cursor`] | a cursor-position and monitor-scale read | "centre on the cursor's monitor" is the placement rule |
 //! | [`round_corners`] | `DWMWA_WINDOW_CORNER_PREFERENCE` | see "Rounded corners" below |
 //!
 //! The correct home for all five is `orca-win`, which was already merged and is
@@ -52,9 +52,9 @@
 //! divides by the per-monitor scale factor before publishing it (see
 //! `check_given_bounds` in `gpui_windows/src/display.rs`, which multiplies back
 //! before calling `MonitorFromPoint`). Comparing the two directly would pick
-//! the wrong monitor on any display that is not at 100%, so [`logical_cursor`]
-//! converts. The conversion needs the cursor's monitor DPI, which
-//! [`logical_cursor`] gets from `GetDpiForMonitor`.
+//! the wrong monitor on any display that is not at 100%, so
+//! [`display_under_cursor`] converts. The conversion needs the cursor's monitor
+//! DPI, which it gets from `GetDpiForMonitor`.
 //!
 //! The interesting half — which display contains a point — is
 //! [`display_containing`], which is pure and tested.
@@ -474,6 +474,7 @@ pub fn move_to(hwnd: HWND, x: f32, y: f32, scale_factor: f32) {
 /// The scale factor is the DPI of the monitor the cursor is on, which is the
 /// only monitor that matters: the point is about to be tested against that
 /// monitor's bounds, and against any other it will not match.
+#[cfg(test)]
 #[must_use]
 pub fn logical_cursor() -> Option<(f32, f32)> {
     let (point, _, scale_x, scale_y) = cursor_geometry()?;
