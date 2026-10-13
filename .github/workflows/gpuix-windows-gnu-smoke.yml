@@ -139,6 +139,8 @@ jobs:
         run: |
           export PATH="$MINGW_PREFIX/bin:$PATH"
           bunx @napi-rs/cli@3.10.4 create-npm-dirs
+          bunx @napi-rs/cli@3.10.4 artifacts
+          test -f npm/win32-x64-gnu/gpuix-native.win32-x64-gnu.node
           bunx @napi-rs/cli@3.10.4 pre-publish --tag-style npm --no-gh-release --skip-optional-publish
           node - <<'NODE'
           const fs = require('node:fs')
