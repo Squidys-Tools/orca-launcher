@@ -258,6 +258,10 @@ show path reuses the latest completed image without waiting.
       ```
       popup: panel rounds itself; DWM corner rounding suppressed=true; accent reset accepted=true
       ```
+      Check the first popup and at least two retained reopens, including the
+      first visible frame. No dark top stroke or gray patches may appear in the
+      lower corners; if either remains, include this line and the corresponding
+      `popup: show ->` lines with the report.
       | What the log says | What it means |
       |---|---|
       | `accent reset accepted=true` | The accent border reset was accepted; inspect the panel edges to confirm the gray box is gone. |

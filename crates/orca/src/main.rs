@@ -496,6 +496,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 // handle is resolved when the real activation lands.
                 window.focus(&focus, cx);
                 if let Some(hwnd) = win::hwnd(window) {
+                    let decoration = win::clear_window_frame(hwnd).summary();
                     // Synchronously, on this thread, and *after* everything
                     // else. `Window::activate_window` cannot be used here: it
                     // spawns its work onto the window's executor, so it returns
@@ -508,7 +509,6 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     win::set_shown(hwnd, true);
                     win::raise(hwnd);
                     let foreground = win::activate(hwnd);
-                    let decoration = win::clear_window_frame(hwnd).summary();
                     // Report the measured state, not the intent. A launcher that
                     // is visible but behind another window is indistinguishable
                     // from one that never opened, and that ambiguity is what
@@ -583,7 +583,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 kind: WindowKind::PopUp,
                 focus: true,
-                show: true,
+                show: false,
                 is_resizable: false,
                 is_minimizable: false,
                 is_movable: false,
@@ -610,15 +610,12 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
             let hwnd = window
                 .update(app, |_, window, cx| {
                     let handle = win::hwnd(window);
-                    place_on_cursor(window, cx);
                     window.focus(&focus, cx);
-                    window.activate_window();
                     // Two Win32 touches on the window's own decoration, both of
                     // them undoing something DWM does to a frameless window.
-                    // The summary is *measured* — DWM is asked what it thinks
-                    // afterwards — because a `Set` returning success has
-                    // already been caught claiming a frame was removed when it
-                    // was not.
+                    // Do both while the HWND is hidden: GPUI applies the
+                    // transparent appearance during open_window, so showing it
+                    // first exposes the native frame for at least one frame.
                     let unrounded = handle.is_some_and(win::round_corners);
                     let decoration = match handle {
                         Some(hwnd) => win::clear_window_frame(hwnd).summary(),
@@ -628,6 +625,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                         "popup: panel rounds itself; DWM corner rounding \
                          suppressed={unrounded}; {decoration}"
                     ));
+                    window.activate_window();
                     handle
                 })
                 .unwrap_or(None);

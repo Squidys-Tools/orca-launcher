@@ -579,6 +579,15 @@ disables DWM's border/shadow after GPUI sets the appearance; doing only one of
 those left a faint rectangular edge. The reset is repeated on each show because
 the retained popup can outlive its original composition state.
 
+The order is load-bearing. In this GPUI pin, the Windows platform window applies
+its initial placement (and can make it visible) before `gpui::Window::new`
+applies `window_background`. Orca therefore opens the first HWND hidden, resets
+the accent and DWM decoration, and only then calls `Window::activate_window()`.
+On retained shows, `clear_window_frame` must likewise run before `ShowWindow`.
+This prevents Windows from presenting a frame before Orca removes it; it does
+not replace the manual check below, which confirms the visible result and the
+read-back log values on Windows.
+
 `SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
 cached, because it is not exported by name in any import library. The
 `AccentPolicy` and `WINDOWCOMPOSITIONATTRIBDATA` structs are declared locally —
