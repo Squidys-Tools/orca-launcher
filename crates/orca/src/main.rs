@@ -508,12 +508,13 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     win::set_shown(hwnd, true);
                     win::raise(hwnd);
                     let foreground = win::activate(hwnd);
+                    let decoration = win::clear_window_frame(hwnd).summary();
                     // Report the measured state, not the intent. A launcher that
                     // is visible but behind another window is indistinguishable
                     // from one that never opened, and that ambiguity is what
                     // made this bug survive two rounds of guessing.
                     log(&format!(
-                        "popup: show -> {}",
+                        "popup: show -> {}; {decoration}",
                         win::describe(hwnd)
                             + if foreground {
                                 ""

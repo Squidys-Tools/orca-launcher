@@ -46,6 +46,7 @@ mod apps;
 mod autostart;
 mod backdrop;
 mod clipboard;
+mod decoration;
 mod foreground;
 mod hotkey;
 mod single_instance;
@@ -62,6 +63,7 @@ pub use autostart::{
 };
 pub use backdrop::{capture_screen_region, BackdropError, CapturedRegion};
 pub use clipboard::{set_clipboard_text, ClipboardError};
+pub use decoration::clear_accent_border;
 pub use foreground::{activate, is_foreground, ForegroundError, WindowHandle};
 pub use hotkey::{
     hotkey_code, modifier_flags, virtual_key, GlobalHotkey, HotkeyBackend, HotkeyError,

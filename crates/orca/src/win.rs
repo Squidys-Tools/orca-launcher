@@ -85,7 +85,8 @@
 //! # The frame around the window
 //!
 //! `WindowBackgroundAppearance::Transparent` — the value the whole design
-//! depends on — also puts a **one-pixel border around the entire window**.
+//! depends on — also asks Windows to draw a **one-pixel border around the
+//! entire window**.
 //!
 //! That is not a GPUI rendering decision. `gpui_windows` maps the appearance
 //! onto `SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
@@ -96,13 +97,14 @@
 //! sends `accent_state = 0` instead, which is why the border is new rather than
 //! pre-existing. Choosing transparency is precisely what asks Windows for it.
 //!
-//! The two things are independent, and that is what makes this fixable: the
-//! per-pixel alpha comes from the Direct Composition swap chain being cleared
-//! to `[0, 0, 0, 0]`, not from the accent policy. So turning the policy back off
-//! removes the frame without changing per-pixel transparency.
+//! The accent border and DWM's own frame are independent. The per-pixel alpha
+//! comes from the Direct Composition swap chain being cleared to `[0, 0, 0, 0]`,
+//! not from the accent policy, so resetting the accent policy does not change
+//! transparency. The accent reset alone did not remove the visible frame; both
+//! it and DWM's border/shadow have to be cleared.
 //!
-//! Hence [`clear_window_frame`]. It is `Opaque`'s `accent_state` of `0` —
-//! `WCA_ACCENT_ENABLE_NONE` — applied after GPUI has set the appearance.
+//! Hence [`clear_window_frame`], which resets both layers after GPUI sets the
+//! appearance.
 
 use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
@@ -264,20 +266,18 @@ pub fn round_corners(hwnd: HWND) -> bool {
 
 /// Removes every piece of window decoration DWM puts on a frameless window.
 ///
-/// # Two attempts, because the first one was wrong
+/// # Two independent sources, both removed
 ///
 /// The first attempt was the accent policy, on the reasoning that
 /// `WindowBackgroundAppearance::Transparent` sends
-/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). **That call returned
-/// success and the frame survived** — `clear_window_frame=true`,
-/// `window frame cleared=true`, no change on screen. So the accent policy was
-/// never what was drawing it, and a log line reporting that the call succeeded
-/// proved nothing whatsoever. Do not trust "the call worked" for a cosmetic
-/// fix; read the value back.
+/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). Resetting it alone
+/// returned success but the frame survived, because DWM's own border and shadow
+/// were still enabled. That did not prove the accent policy was harmless; both
+/// layers have to be cleared, and the accent reset is repeated after each show.
 ///
-/// What is left is DWM's own decoration, which Windows draws around *any*
-/// top-level window regardless of its style bits, and which has to be turned
-/// off through the DWM attributes rather than through compositor state:
+/// DWM's own decoration is a separate layer, which Windows draws around
+/// top-level windows regardless of their style bits. It has to be turned off
+/// through the DWM attributes:
 ///
 /// * `DWMWA_BORDER_COLOR` → `DWMWA_COLOR_NONE`. The 1px outline. It is a
 ///   *colour*, not a flag, and the sentinel that removes it is `0xFFFFFFFE` —
@@ -290,6 +290,8 @@ pub fn round_corners(hwnd: HWND) -> bool {
 /// the frame is not DWM's, and the next place to look is our own painting —
 /// specifically whether the panel's fill is escaping its rounded clip.
 pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
+    let accent_cleared =
+        orca_win::clear_accent_border(orca_win::WindowHandle::from_raw(hwnd.0 as isize));
     // SAFETY: `hwnd` is a live window this process owns. Each call passes a
     // pointer to exactly as many bytes of live, initialised local storage as it
     // claims, and both attributes only affect rendering.
@@ -315,6 +317,7 @@ pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
     .is_ok();
 
     WindowDecoration {
+        accent_cleared,
         border_cleared,
         shadow_cleared,
         border_now: read_dwm_u32(hwnd, DWMWA_BORDER_COLOR),
@@ -339,9 +342,11 @@ fn read_dwm_u32(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<u32> {
     ok.then_some(value)
 }
 
-/// What `clear_window_frame` was able to do, and what DWM reports afterwards.
+/// What `clear_window_frame` reset and what DWM reports afterwards.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDecoration {
+    /// The transparent accent policy reset was accepted.
+    pub accent_cleared: bool,
     /// `DWMWA_BORDER_COLOR` was accepted.
     pub border_cleared: bool,
     /// `DWMWA_NCRENDERING_POLICY` was accepted.
@@ -377,8 +382,8 @@ impl WindowDecoration {
             None => "unreadable",
         };
         format!(
-            "border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
-            self.border_cleared, self.shadow_cleared,
+            "accent reset accepted={} | border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
+            self.accent_cleared, self.border_cleared, self.shadow_cleared,
         )
     }
 }

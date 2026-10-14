@@ -568,11 +568,12 @@ rather than pre-existing — choosing transparency is precisely what asks Window
 for it. Read it in `gpui_windows/src/window.rs`, `set_background_appearance`
 and `set_window_composition_attribute`.
 
-The two mechanisms are independent, which is what makes it fixable in six lines:
-the per-pixel alpha comes from the Direct Composition swap chain being cleared
-to `[0, 0, 0, 0]`, **not** from the accent policy. So `win::clear_window_frame`
-sends `accent_state = 0` (`WCA_ACCENT_ENABLE_NONE`) after GPUI has set the
-appearance. The frame goes, and the panel's rounded corners stay transparent.
+The accent border and DWM's frame are independent. The per-pixel alpha comes
+from the Direct Composition swap chain being cleared to `[0, 0, 0, 0]`, **not**
+from the accent policy. `win::clear_window_frame` resets the accent policy and
+disables DWM's border/shadow after GPUI sets the appearance; doing only one of
+those left a faint rectangular edge. The reset is repeated on each show because
+the retained popup can outlive its original composition state.
 
 `SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
 cached, because it is not exported by name in any import library. The

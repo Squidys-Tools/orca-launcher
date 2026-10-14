@@ -255,12 +255,12 @@ show path reuses the latest completed image without waiting.
 - [ ] **There must be no 1px frame around the panel**, and the corners are rounded
       with a radius visibly larger than the selected row's. Read the log:
       ```
-      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
+      popup: panel rounds itself; DWM corner rounding suppressed=true; accent reset accepted=true
       ```
       | What the log says | What it means |
       |---|---|
-      | `window frame cleared=true` | The frame removal was accepted by Windows. |
-      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. |
+      | `accent reset accepted=true` | The accent border reset was accepted; inspect the panel edges to confirm the gray box is gone. |
+      | `accent reset accepted=false` | `SetWindowCompositionAttribute` was unavailable or refused. |
       | `DWM corner rounding suppressed=false` | Expected below Windows 11, a defect on it. |
 - [ ] No shadow or grey halo appears around the panel. The log should report
       `dwm shadow suppressed=true`; DWM's shadow is not part of the panel.
