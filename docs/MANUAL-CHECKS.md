@@ -252,8 +252,9 @@ show path reuses the latest completed image without waiting.
 - [ ] The desktop stays visible right up to the panel's rounded edges. There is
       no square image/tint at the corners and no black rectangle outside the
       panel; either means per-pixel alpha or rounded-layer clipping is broken.
-- [ ] **There must be no 1px frame around the panel**, and the corners are rounded
-      with a radius visibly larger than the selected row's. Read the log:
+- [ ] **There must be no 1px frame or gray hairline around the panel**, and the
+      corners are rounded with a radius visibly larger than the selected row's.
+      Read the log:
       ```
       popup: panel rounds itself; DWM corner rounding suppressed=true; accent reset accepted=true
       ```

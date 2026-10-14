@@ -436,6 +436,10 @@ With an empty query, the window shrinks to the 64px search bar; its top-left
 stays at the expanded panel's anchor so typing can expand downward without
 moving the panel.
 
+The outer panel has no separate hairline border: over a bright captured desktop,
+the translucent edge already reads as a gray box. Theme borders remain on the
+interior separators and footer pills.
+
 **`WindowOptions::window_background` is `Transparent`, and the root view is not
 painted.** `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
 non-`Opaque` appearance and presents through a `DXGI_ALPHA_MODE_PREMULTIPLIED`

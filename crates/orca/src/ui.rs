@@ -1005,8 +1005,6 @@ impl Render for LauncherView {
                     .relative()
                     .rounded(px(PANEL_RADIUS))
                     .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
                     .overflow_hidden()
                     .when_some(backdrop, |panel, image| {
                         panel
