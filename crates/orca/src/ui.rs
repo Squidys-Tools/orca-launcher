@@ -3,8 +3,8 @@
 //!
 //! # The frame
 //!
-//! The window is **larger than the panel** and transparent outside it. That one
-//! decision is what makes the launcher look like the thing it is imitating
+//! The window is the same size as the panel and transparent outside its rounded
+//! paint. That is what makes the launcher look like the thing it is imitating
 //! rather than like a dialog, and it is load-bearing in three places:
 //!
 //! * `WindowOptions::window_background` is [`WindowBackgroundAppearance::Transparent`].
@@ -12,19 +12,18 @@
 //!   non-opaque appearance and presents through a `DXGI_ALPHA_MODE_PREMULTIPLIED`
 //!   Direct Composition swap chain, so anything the scene does not paint is
 //!   genuinely see-through rather than black.
-//! * The panel is a rounded rect inset by [`FRAME_MARGIN`], so the corners are
-//!   rounded *by the paint* and the margin is where the drop shadow lives. The
-//!   alternative — `DWMWA_WINDOW_CORNER_PREFERENCE` — is Windows 11 only, has
-//!   no radius worth having, and would round the outside of the shadow. See
-//!   `win.rs`.
-//! * Because the window is transparent, the panel's fill is the only opaque
-//!   thing in it, and every colour inside it is composited against that fill
-//!   rather than against the desktop. See [`crate::theme`].
+//! * The panel and each backdrop layer are rounded by the paint. GPUI's
+//!   `overflow_hidden` mask clips to rectangular bounds, so it cannot round an
+//!   image layer for us. The alternative — `DWMWA_WINDOW_CORNER_PREFERENCE` —
+//!   is Windows 11 only and offers no radius worth having. See `win.rs`.
+//! * Because the window is transparent, the panel layers a blurred capture
+//!   under its translucent tint. Every colour inside it is composited over that
+//!   tint rather than directly against the desktop. See [`crate::theme`].
 //!
-//! The panel is **opaque**, not frosted. It used to capture the desktop behind
-//! itself, blur it, and paint it under a translucent fill; that is gone until
-//! the feature work is further along, and `docs/ARCHITECTURE.md` records what
-//! was removed and what restoring it costs.
+//! The panel paints a blurred capture of the desktop taken while the window is
+//! hidden, then tints it with the current theme. Capture and blur happen away
+//! from the show path; `docs/ARCHITECTURE.md` records why the sample is slightly
+//! stale and why that is preferable to delaying the launcher.
 //!
 //! Everything in this file that looks like GPUI folklore is load-bearing, and
 //! each of the four items below cost a debugging cycle to find. They are
@@ -53,6 +52,7 @@
 //! compile. The parameter deliberately shadows the outer `cx`.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gpui::prelude::*;
@@ -98,31 +98,21 @@ actions!(
     ]
 );
 
-/// The panel's width, in logical pixels, excluding the shadow margin.
+/// The panel and window width, in logical pixels.
 pub const POPUP_WIDTH: f32 = 660.0;
-/// The panel's height, in logical pixels, excluding the shadow margin.
+/// The panel and window height, in logical pixels.
 ///
 /// 430 is not a free choice. Windows clamps a window that is larger than the
 /// display, and the tightest display still in use is a 1366×768 laptop at 150%
-/// scaling, which is 512 logical pixels tall. Panel + margin has to fit inside
-/// that with room to spare, which is what caps this number; the row height and
-/// the two fixed bars below spend what is left.
+/// scaling, which is 512 logical pixels tall. The panel has to fit inside that
+/// with room to spare, which is what caps this number; the row height and the
+/// two fixed bars below spend what is left.
 pub const POPUP_HEIGHT: f32 = 430.0;
 
-/// Transparent margin on every side of the panel, and therefore the difference
-/// between the panel and the window.
-///
-/// Not decoration. The widest shadow in [`crate::theme::Theme::panel_shadows`]
-/// is a 56px blur offset 24px down, so it needs roughly 40px of room before it
-/// reaches the window edge; a window sized to the panel would clip its own
-/// shadow into a hard rectangle, which is the exact artefact the margin exists
-/// to avoid. The window is [`WINDOW_WIDTH`] × [`WINDOW_HEIGHT`].
-pub const FRAME_MARGIN: f32 = 32.0;
-
-/// The window's width: the panel plus [`FRAME_MARGIN`] on both sides.
-pub const WINDOW_WIDTH: f32 = POPUP_WIDTH + FRAME_MARGIN * 2.0;
-/// The expanded window's height: the panel plus [`FRAME_MARGIN`] top and bottom.
-pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT + FRAME_MARGIN * 2.0;
+/// The popup window width.
+pub const WINDOW_WIDTH: f32 = POPUP_WIDTH;
+/// The popup window height.
+pub const WINDOW_HEIGHT: f32 = POPUP_HEIGHT;
 
 /// The panel's corner radius.
 ///
@@ -134,8 +124,8 @@ const PANEL_RADIUS: f32 = 18.0;
 /// The search field's height. Taller than a row so the query reads as the
 /// panel's subject rather than as another list item.
 const SEARCH_HEIGHT: f32 = 64.0;
-/// The window height while the query is empty: the search bar plus its shadow margin.
-pub const WINDOW_COMPACT_HEIGHT: f32 = SEARCH_HEIGHT + FRAME_MARGIN * 2.0;
+/// The window height while the query is empty: just the search bar.
+pub const WINDOW_COMPACT_HEIGHT: f32 = SEARCH_HEIGHT;
 /// One row of the result list.
 const ROW_HEIGHT: f32 = 40.0;
 /// The status bar's height.
@@ -260,6 +250,15 @@ pub struct Launcher {
     /// What `theme_preference` resolved to last frame.
     pub theme: Theme,
 
+    /// The latest blurred desktop capture, prepared while the window is hidden.
+    pub backdrop: Option<Arc<RenderImage>>,
+    /// Invalidates older background captures that finish after a newer request.
+    pub backdrop_generation: u64,
+    /// Lets background capture tasks discard work when showing starts.
+    pub backdrop_visible: Arc<AtomicBool>,
+    /// Requests a fresh sample after either the hotkey or Escape hides the window.
+    pub on_hidden: Option<Arc<dyn Fn() + Send + Sync>>,
+
     /// Shared with the background threads.
     pub engine: Arc<Engine>,
     /// Shared with the frame that measures the popup's latency.
@@ -318,6 +317,10 @@ impl Launcher {
             last_bounds: None,
             theme_preference,
             theme: resolved,
+            backdrop: None,
+            backdrop_generation: 0,
+            backdrop_visible: Arc::new(AtomicBool::new(false)),
+            on_hidden: None,
             engine,
             telemetry,
         }
@@ -347,6 +350,12 @@ impl Launcher {
         }
         window.resize(size(bounds.size.width, px(target_height)));
         window.refresh();
+    }
+
+    /// Invalidates pending captures before a visibility transition.
+    pub fn set_backdrop_visible(&mut self, visible: bool) {
+        self.backdrop_generation = self.backdrop_generation.wrapping_add(1);
+        self.backdrop_visible.store(visible, Ordering::Release);
     }
 
     /// Re-resolves the theme against the window's current appearance.
@@ -437,6 +446,10 @@ impl Launcher {
         self.reset();
         if let Some(hwnd) = self.hwnd {
             crate::win::set_shown(hwnd, false);
+        }
+        self.set_backdrop_visible(false);
+        if let Some(on_hidden) = &self.on_hidden {
+            on_hidden();
         }
         plan
     }
@@ -964,16 +977,14 @@ impl Render for LauncherView {
         let focus = self.launcher.read(cx).focus.clone();
         let entity = self.launcher.clone();
         let telemetry = self.launcher.read(cx).telemetry.clone();
+        let backdrop = self.launcher.read(cx).backdrop.clone();
 
-        // The root is deliberately *not* painted. It is the shadow margin, and
-        // the window behind it is transparent — see the module docs. Giving it
-        // `theme.background` here is the single change that turns the launcher
-        // back into a dialog.
+        // The root is deliberately not painted; the panel owns its rounded fill
+        // and the transparent window exposes the desktop around its corners.
         div()
             .flex()
             .flex_col()
             .size_full()
-            .p(px(FRAME_MARGIN))
             .text_color(theme.text)
             .on_action(cx.listener(Self::on_hide))
             .on_action(cx.listener(Self::on_quit))
@@ -994,12 +1005,25 @@ impl Render for LauncherView {
                     .relative()
                     .rounded(px(PANEL_RADIUS))
                     .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow(theme.panel_shadows())
-                    // Clips the rows to the panel's radius. Without it the scrolled
-                    // list paints square corners over the rounded ones.
                     .overflow_hidden()
+                    .when_some(backdrop, |panel, image| {
+                        panel
+                            .child(
+                                div().absolute().inset_0().child(
+                                    img(ImageSource::Render(image))
+                                        .object_fit(ObjectFit::Fill)
+                                        .rounded(px(PANEL_RADIUS))
+                                        .size_full(),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(PANEL_RADIUS))
+                                    .bg(theme.background),
+                            )
+                    })
                     .child(self.search_field(theme, &focus, entity, telemetry))
                     .when(!query_empty, |panel| {
                         panel

@@ -67,10 +67,8 @@
 //! attribute looks like the obvious answer first:
 //!
 //! * `DWMWA_WINDOW_CORNER_PREFERENCE` is Windows 11 only, offers only a few
-//!   radii (8px, 4px, none), and rounds the *window*. The panel wants about
-//!   20px, and the window is deliberately larger than the panel so the drop
-//!   shadow has somewhere to live — so DWM would round the outside edge of the
-//!   shadow, which is the one edge that has to stay square.
+//!   radii (8px, 4px, none), and rounds the *window*. The panel wants 16px, so
+//!   DWM would replace the painted radius with a smaller system radius.
 //! * It only reaches windows DWM redirects, and `gpui_windows` sets
 //!   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
 //!   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set — in
@@ -82,13 +80,13 @@
 //! call.
 //!
 //! This function therefore *suppresses* the DWM rounding rather than asking for
-//! it, so a Windows 11 build cannot quietly round the window's outer edge and
-//! clip the shadow the panel is floating on.
+//! it, so a Windows 11 build cannot quietly replace the panel's painted radius.
 //!
 //! # The frame around the window
 //!
 //! `WindowBackgroundAppearance::Transparent` — the value the whole design
-//! depends on — also puts a **one-pixel border around the entire window**.
+//! depends on — also asks Windows to draw a **one-pixel border around the
+//! entire window**.
 //!
 //! That is not a GPUI rendering decision. `gpui_windows` maps the appearance
 //! onto `SetWindowCompositionAttribute` with a `WCA_ACCENT_POLICY`, and for
@@ -99,13 +97,14 @@
 //! sends `accent_state = 0` instead, which is why the border is new rather than
 //! pre-existing. Choosing transparency is precisely what asks Windows for it.
 //!
-//! The two things are independent, and that is what makes this fixable: the
-//! per-pixel alpha comes from the Direct Composition swap chain being cleared
-//! to `[0, 0, 0, 0]`, not from the accent policy. So turning the policy back off
-//! removes the frame and leaves the shadow margin transparent.
+//! The accent border and DWM's own frame are independent. The per-pixel alpha
+//! comes from the Direct Composition swap chain being cleared to `[0, 0, 0, 0]`,
+//! not from the accent policy, so resetting the accent policy does not change
+//! transparency. The accent reset alone did not remove the visible frame; both
+//! it and DWM's border/shadow have to be cleared.
 //!
-//! Hence [`clear_window_frame`]. It is `Opaque`'s `accent_state` of `0` —
-//! `WCA_ACCENT_ENABLE_NONE` — applied after GPUI has set the appearance.
+//! Hence [`clear_window_frame`], which resets both layers after GPUI sets the
+//! appearance.
 
 use crate::log;
 use gpui::{App, DisplayId, Pixels, Window};
@@ -238,10 +237,9 @@ pub fn activate(hwnd: HWND) -> bool {
 
 /// Stops DWM from rounding the window's own corners.
 ///
-/// The panel rounds itself; see the module docs for why. This exists so that
-/// the one edge which must stay square — the outside of the drop shadow — stays
-/// square on Windows 11, where DWM rounds frameless top-level windows by
-/// default.
+/// The panel rounds itself; see the module docs for why. This exists so DWM
+/// cannot replace the painted radius with its smaller system radius on Windows
+/// 11, where it rounds frameless top-level windows by default.
 ///
 /// Reports whether Windows accepted the request. `false` is not a failure to
 /// act on: the attribute is Windows 11 build 22000 and later, and on anything
@@ -268,34 +266,32 @@ pub fn round_corners(hwnd: HWND) -> bool {
 
 /// Removes every piece of window decoration DWM puts on a frameless window.
 ///
-/// # Two attempts, because the first one was wrong
+/// # Two independent sources, both removed
 ///
 /// The first attempt was the accent policy, on the reasoning that
 /// `WindowBackgroundAppearance::Transparent` sends
-/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). **That call returned
-/// success and the frame survived** — `clear_window_frame=true`,
-/// `window frame cleared=true`, no change on screen. So the accent policy was
-/// never what was drawing it, and a log line reporting that the call succeeded
-/// proved nothing whatsoever. Do not trust "the call worked" for a cosmetic
-/// fix; read the value back.
+/// `WCA_ACCENT_FLAG_DRAW_ALLBORDERS` (module docs above). Resetting it alone
+/// returned success but the frame survived, because DWM's own border and shadow
+/// were still enabled. That did not prove the accent policy was harmless; both
+/// layers have to be cleared, and the accent reset is repeated after each show.
 ///
-/// What is left is DWM's own decoration, which Windows draws around *any*
-/// top-level window regardless of its style bits, and which has to be turned
-/// off through the DWM attributes rather than through compositor state:
+/// DWM's own decoration is a separate layer, which Windows draws around
+/// top-level windows regardless of their style bits. It has to be turned off
+/// through the DWM attributes:
 ///
 /// * `DWMWA_BORDER_COLOR` → `DWMWA_COLOR_NONE`. The 1px outline. It is a
 ///   *colour*, not a flag, and the sentinel that removes it is `0xFFFFFFFE` —
 ///   passing black would just draw a black border.
 /// * `DWMWA_NCRENDERING_POLICY` → `DWMNCRP_DISABLED`. DWM's automatic drop
-///   shadow. We draw our own, on the panel; DWM's is around the *window*,
-///   which is the larger rectangle, so it sits outside ours rather than behind
-///   it.
+///   shadow, which is not part of the panel design.
 ///
 /// Both are then read back with `DwmGetWindowAttribute` and reported. If the
 /// read-back says the border colour is `none` and a frame is *still* visible,
 /// the frame is not DWM's, and the next place to look is our own painting —
 /// specifically whether the panel's fill is escaping its rounded clip.
 pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
+    let accent_cleared =
+        orca_win::clear_accent_border(orca_win::WindowHandle::from_raw(hwnd.0 as isize));
     // SAFETY: `hwnd` is a live window this process owns. Each call passes a
     // pointer to exactly as many bytes of live, initialised local storage as it
     // claims, and both attributes only affect rendering.
@@ -321,6 +317,7 @@ pub fn clear_window_frame(hwnd: HWND) -> WindowDecoration {
     .is_ok();
 
     WindowDecoration {
+        accent_cleared,
         border_cleared,
         shadow_cleared,
         border_now: read_dwm_u32(hwnd, DWMWA_BORDER_COLOR),
@@ -345,9 +342,11 @@ fn read_dwm_u32(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE) -> Option<u32> {
     ok.then_some(value)
 }
 
-/// What `clear_window_frame` was able to do, and what DWM reports afterwards.
+/// What `clear_window_frame` reset and what DWM reports afterwards.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDecoration {
+    /// The transparent accent policy reset was accepted.
+    pub accent_cleared: bool,
     /// `DWMWA_BORDER_COLOR` was accepted.
     pub border_cleared: bool,
     /// `DWMWA_NCRENDERING_POLICY` was accepted.
@@ -383,8 +382,8 @@ impl WindowDecoration {
             None => "unreadable",
         };
         format!(
-            "border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
-            self.border_cleared, self.shadow_cleared,
+            "accent reset accepted={} | border set={} now={border} | dwm shadow suppressed={} | corners now={corners}",
+            self.accent_cleared, self.border_cleared, self.shadow_cleared,
         )
     }
 }
@@ -398,6 +397,16 @@ pub fn is_visible(hwnd: HWND) -> bool {
     // SAFETY: `hwnd` is a live window handle. `IsWindowVisible` is a pure query
     // with no side effects and no preconditions beyond a valid handle.
     unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+/// The window's physical screen rectangle, suitable for a hidden-screen capture.
+pub(crate) fn physical_window_rect(hwnd: HWND) -> Option<(i32, i32, u32, u32)> {
+    let mut rect = RECT::default();
+    // SAFETY: `hwnd` is owned by this process and `rect` is writable storage.
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    let width = u32::try_from(rect.right - rect.left).ok()?;
+    let height = u32::try_from(rect.bottom - rect.top).ok()?;
+    (width > 0 && height > 0).then_some((rect.left, rect.top, width, height))
 }
 
 /// A one-line, human-readable summary of a window's real state.
@@ -500,6 +509,12 @@ fn primary_scale_factor() -> f32 {
     monitor_scale_factors(monitor)
         .map(|(scale_x, _)| scale_x)
         .unwrap_or(1.0)
+}
+
+/// The cursor's physical position and its monitor's scale factor.
+pub(crate) fn cursor_physical_and_scale() -> Option<((i32, i32), f32)> {
+    let (point, _, scale_x, _) = cursor_geometry()?;
+    Some(((point.x, point.y), scale_x))
 }
 
 /// The cursor, and the effective DPI of its monitor, in one trip to Win32.

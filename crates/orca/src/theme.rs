@@ -14,26 +14,16 @@
 //!
 //! # What "contrast" is measured against
 //!
-//! The panel is **opaque**, so its own RGB is the colour the user sees and a
-//! contrast check needs no help. What is *not* opaque is everything painted on
-//! top of it: the selection fill, the footer pills, the border. Those are
-//! alpha-blended over the panel, and a `15%`-white selection over a near-black
-//! panel is a slightly lighter near-black — which is what makes a highlighted
-//! row readable, and is also why checking the selection's raw RGB against the
-//! text would score a number about nothing.
+//! The panel is translucent over a blurred desktop capture, so contrast tests
+//! composite the panel and its child fills against both black and white. Those
+//! are the conservative extremes for the unknown pixels behind the launcher.
+//! The selection is composited over the panel before measuring text, because
+//! it does not replace the panel with its own RGB.
 //!
-//! So the tests composite: they carry their own source-over, which is the same
-//! maths the renderer's blend state does, and every contrast assertion is made
-//! against the fill composited onto the panel.
-//!
-//! This was not always true. The panel used to be a translucent fill over a
-//! captured and blurred desktop, and the checks then had to composite the panel
-//! itself over two extreme backdrops — a white and a black wallpaper — because
-//! the desktop behind the launcher was not under our control. The capture is
-//! gone for now (`docs/ARCHITECTURE.md`); if it comes back, those two backdrops
-//! come back with it.
+//! The tests use the same source-over math as the renderer's blend state, then
+//! measure the lowest contrast over the two extreme backdrops.
 
-use gpui::{hsla, px, BoxShadow, Rgba};
+use gpui::Rgba;
 use orca_core::config::ThemePreference;
 use orca_core::Source;
 
@@ -64,11 +54,10 @@ const fn rgba_alpha(hex: u32, alpha: f32) -> Rgba {
 
 /// A resolved palette.
 ///
-/// `background` is opaque: it is the panel, and it is the surface every other
-/// entry is composited onto. The three fills are translucent because they are
-/// painted over the panel rather than replacing it — a selection is a
-/// *lightening* of the panel, not a colour of its own. The text colours are
-/// opaque because a translucent glyph is one more rounding away from invisible.
+/// `background` tints the captured desktop. The three other fills are
+/// translucent because they layer over that panel — a selection is a
+/// *lightening* of the panel, not a colour of its own. Text stays opaque so it
+/// remains readable over both theme variants.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     /// The panel fill.
@@ -93,25 +82,25 @@ pub struct Theme {
 impl Theme {
     /// The dark palette.
     pub const DARK: Theme = Theme {
-        background: rgba(0x101014),
-        surface: rgba_alpha(0xffffff, 0.08),
-        border: rgba_alpha(0xffffff, 0.12),
-        selection: rgba_alpha(0xffffff, 0.15),
-        text: rgba(0xf2f2f2),
-        dim: rgba(0xb0b0ba),
-        accent: rgba(0x4c9bff),
+        background: rgba_alpha(0x0a0a0d, 0.65),
+        surface: rgba_alpha(0xffffff, 0.07),
+        border: rgba_alpha(0xffffff, 0.11),
+        selection: rgba_alpha(0xffffff, 0.06),
+        text: rgba(0xf6f6f8),
+        dim: rgba(0xececf1),
+        accent: rgba(0xe3efff),
         on_selection: rgba(0xffffff),
     };
 
     /// The light palette.
     pub const LIGHT: Theme = Theme {
-        background: rgba(0xf4f4f7),
+        background: rgba_alpha(0xf4f4f7, 0.65),
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
         text: rgba(0x16161a),
-        dim: rgba(0x494952),
-        accent: rgba(0x0a4fa8),
+        dim: rgba(0x2c2c34),
+        accent: rgba(0x082b5a),
         on_selection: rgba(0x16161a),
     };
 
@@ -133,21 +122,6 @@ impl Theme {
                 }
             }
         }
-    }
-
-    /// The drop shadow under the panel.
-    ///
-    /// Two shadows rather than one, because a single large blur reads as a grey
-    /// halo: the tight one is the contact shadow that says the panel is above
-    /// the desktop, and the wide one is the ambient occlusion that says it is
-    /// floating. This is the reason the window is larger than the panel — the
-    /// ambient shadow needs somewhere to go.
-    #[must_use]
-    pub fn panel_shadows(self) -> Vec<BoxShadow> {
-        vec![
-            BoxShadow::new(px(0.), px(2.), hsla(0.0, 0.0, 0.0, 0.44)).blur_radius(px(6.)),
-            BoxShadow::new(px(0.), px(24.), hsla(0.0, 0.0, 0.0, 0.30)).blur_radius(px(56.)),
-        ]
     }
 }
 
@@ -230,16 +204,26 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    /// The two backdrops a translucent panel can land on that matter most: a
+    /// pure white wallpaper and a pure black one.
+    const BACKDROPS: [(&str, Rgba); 2] = [("white", rgba(0xffffff)), ("black", rgba(0x000000))];
+
     /// The lowest contrast `foreground` reaches against the surface it is
-    /// actually drawn on.
+    /// actually drawn on, over either extreme backdrop.
     ///
     /// `fill` is composited *on top of* the panel. The panel cannot be skipped:
     /// a selection highlight does not sit on the desktop, it sits on the panel,
     /// and a 15%-white highlight over a near-black panel is dark enough for white
     /// text to clear 4.5:1 on. Compositing it against anything else scores a
     /// number about nothing.
-    fn drawn_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
-        contrast(foreground, composite_over(fill, theme.background))
+    fn worst_contrast(theme: Theme, foreground: Rgba, fill: Rgba) -> f32 {
+        BACKDROPS
+            .iter()
+            .map(|(_, backdrop)| {
+                let panel = composite_over(theme.background, *backdrop);
+                contrast(foreground, composite_over(fill, panel))
+            })
+            .fold(f32::INFINITY, f32::min)
     }
 
     #[test]
@@ -268,37 +252,37 @@ mod tests {
         // property of a palette that a human should never have to check, and it
         // is the property that regresses silently when someone tunes a hex.
         //
-        // Checked against the composited fill, which for the panel is itself and
-        // for a selection is that fill over the panel.
+        // The desktop behind the translucent panel is not ours, so test both
+        // extreme backdrops and include the panel under every child fill.
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
             for (role, foreground, fill) in [
-                ("text on panel", theme.text, theme.background),
-                ("dim on panel", theme.dim, theme.background),
-                ("accent on panel", theme.accent, theme.background),
+                ("text on panel", theme.text, rgba_alpha(0x000000, 0.0)),
+                ("dim on panel", theme.dim, rgba_alpha(0x000000, 0.0)),
+                ("accent on panel", theme.accent, rgba_alpha(0x000000, 0.0)),
                 ("text on selection", theme.on_selection, theme.selection),
                 ("dim on selection", theme.dim, theme.selection),
             ] {
-                let ratio = drawn_contrast(theme, foreground, fill);
+                let ratio = worst_contrast(theme, foreground, fill);
                 assert!(
                     ratio >= 4.5,
-                    "{name}: {role} is only {ratio:.2}:1 on the surface it is drawn \
-                     on, below the 4.5:1 floor"
+                    "{name}: {role} is only {ratio:.2}:1 over the worst backdrop, \
+                     below the 4.5:1 floor"
                 );
             }
         }
     }
 
     #[test]
-    fn the_panel_is_opaque() {
-        // The window around the panel is transparent, so an alpha below 1.0 on
-        // the panel fill means the desktop shows through the card itself —
-        // legible text behind the launcher's own text. Asserted because an
-        // alpha here is invisible in every other test: dropping it to 0.9 would
-        // pass all of them.
+    fn the_panel_is_translucent_but_keeps_a_readable_tint() {
         for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
-            assert_eq!(
-                theme.background.a, 1.0,
-                "{name}: the panel fill must be opaque, not alpha {}",
+            assert!(
+                theme.background.a < 0.7,
+                "{name}: panel tint hides too much of the backdrop (alpha {})",
+                theme.background.a
+            );
+            assert!(
+                theme.background.a > 0.5,
+                "{name}: panel tint is too transparent (alpha {})",
                 theme.background.a
             );
         }
@@ -337,8 +321,8 @@ mod tests {
             "half black over black should be black, got {}",
             over_black.r
         );
-        // Fully transparent on top leaves the backdrop untouched, which is what
-        // the unpainted shadow margin around the panel relies on.
+        // Fully transparent on top leaves the desktop untouched, which is what
+        // the rounded panel's corners rely on.
         let clear = composite_over(rgba_alpha(0xff0000, 0.0), rgba(0x123456));
         assert_eq!(clear.r, rgba(0x123456).r);
         assert_eq!(clear.a, 1.0, "an opaque backdrop stays opaque");
@@ -360,21 +344,5 @@ mod tests {
                 "{source:?} name {name:?} is too wide for one row"
             );
         }
-    }
-
-    #[test]
-    fn the_shadow_has_a_tight_layer_and_a_wide_one() {
-        // One blur cannot do both jobs: a wide one alone reads as a grey halo
-        // rather than as a panel above a surface, and a tight one alone reads
-        // as a sticker. The wide layer is also why the window is larger than
-        // the panel, so the ordering of the two is the property that matters.
-        let shadows = Theme::DARK.panel_shadows();
-        assert_eq!(shadows.len(), 2);
-        let (tight, wide) = (&shadows[0], &shadows[1]);
-        assert!(
-            tight.blur_radius < wide.blur_radius,
-            "the contact shadow must be the tighter of the two"
-        );
-        assert!(wide.offset.y > tight.offset.y, "the wide shadow sits lower");
     }
 }

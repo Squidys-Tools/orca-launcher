@@ -223,40 +223,61 @@ foreground lock. That Alt tap is a known cost and a known source of weirdness.
    was typed characters vanishing with no error anywhere. If you see one
    character lost, the activation order in `main::show` is wrong.
 
-### 1f. The frame, and an opaque panel
+### 1f. The frame, and the frosted panel
 
-The panel is **opaque**. It does not capture the screen behind it, so nothing
-shows through the card — this changed 2026-10-03, when the frosted backdrop and
-the translucency were removed together. Nothing is photographed from the display
-any more either, which is worth knowing if you were avoiding the launcher for that
-reason.
+The panel is a translucent tint over a blurred screen capture. Captures happen
+before the first window exists and after each hide, on the background executor.
+If the popup is shown while a capture is pending, that sample is discarded; the
+show path reuses the latest completed image without waiting.
 
-- [ ] Put a window full of text behind the launcher and press the hotkey.
-      **Expected:** not one pixel of it is visible inside the panel. If the
-      desktop shows through, `Theme::DARK.background.a` is no longer 1.0.
-- [ ] Around the panel — roughly 32px on every side — you see the **desktop**, not
-      black. A black square the size of the whole window means the swap chain's
-      alpha is being ignored. This is `WindowOptions::window_background` and it is
-      load-bearing.
-- [ ] **There must be no 1px frame around the panel**, and the corners are rounded
-      with a radius visibly larger than the selected row's. Read the log:
+- [ ] Put a window full of text behind the launcher, then hide and reopen it.
+      **Expected:** desktop text loses its sharp edges, broad shapes and colors
+      still show through the tint, and Orca's own text stays crisp. If the panel
+      looks opaque or the desktop text stays crisp, the blur or translucent
+      layer is not being applied; if the sampled content does not match the
+      window behind the panel, check the capture bounds and display scaling.
+- [ ] Hide the launcher, change what is behind it, then reopen it.
+      **Expected:** the reopened panel shows the sample taken just after the
+      hide, not the popup itself. A change made after hiding will appear only
+      after the next hide-and-reopen cycle. The log should report
+      `backdrop: captured and blurred` from `hidden window region` after hiding.
+- [ ] Move the cursor to monitors with different DPI scales, including one left
+      of the primary display; hide and reopen once at each location.
+      **Expected:** after the hide refresh, the captured content stays aligned
+      beneath the panel at each scale; negative coordinates must not shift or
+      mirror the sample. The first show after moving may use the previous sample.
+- [ ] Start with the compact search bar, then type a query to expand the panel.
+      The blurred capture must fill the expanded panel rather than stretching
+      the compact bar's shorter sample vertically.
+- [ ] The desktop stays visible right up to the panel's rounded edges. There is
+      no square image/tint at the corners and no black rectangle outside the
+      panel; either means per-pixel alpha or rounded-layer clipping is broken.
+- [ ] **There must be no 1px frame or gray hairline around the panel**, and the
+      corners are rounded with a radius visibly larger than the selected row's.
+      Read the log:
       ```
-      popup: panel rounds itself; DWM corner rounding suppressed=true, window frame cleared=true
+      popup: panel rounds itself; DWM corner rounding suppressed=true; accent reset accepted=true
       ```
+      Check the first popup and at least two retained reopens, including the
+      first visible frame. No dark top stroke or gray patches may appear in the
+      lower corners; if either remains, include this line and the corresponding
+      `popup: show ->` lines with the report.
       | What the log says | What it means |
       |---|---|
-      | `window frame cleared=true` | The frame removal was accepted by Windows. |
-      | `window frame cleared=false` | `SetWindowCompositionAttribute` was not found or refused. |
+      | `accent reset accepted=true` | The accent border reset was accepted; inspect the panel edges to confirm the gray box is gone. |
+      | `accent reset accepted=false` | `SetWindowCompositionAttribute` was unavailable or refused. |
       | `DWM corner rounding suppressed=false` | Expected below Windows 11, a defect on it. |
-- [ ] The drop shadow is soft and **not cut off** at the window edge, and looks
-      like two layers rather than one grey halo. A hard straight edge means
-      `ui::FRAME_MARGIN` is too small for the 56px blur.
+- [ ] No shadow or grey halo appears around the panel. The log should report
+      `dwm shadow suppressed=true`; DWM's shadow is not part of the panel.
 - [ ] The tray shows a real icon, not a blank slot, and right-click → *Quit*
       exits. Two separate bugs met here: a null `hIcon` gave a blank slot, and a
       *fatal* icon load meant no tray at all — which on a resident app means no
       way to quit. If the icon is blank, say so and paste the `tray:` lines.
-- [ ] No line mentioning `backdrop` appears in the log, at startup or on any
-      toggle. One is a leftover call site.
+- [ ] The startup log reports a capture from `startup region`, and each hide
+      reports one from `hidden window region`. If the popup is reopened before
+      a pending sample starts or finishes, the log may say the capture was
+      skipped because the popup is visible; the show path must not wait for or
+      initiate a capture.
 
 ## 2. Latency, now that the window is retained
 
@@ -269,11 +290,10 @@ The popup shows its own hotkey-to-first-paint time in the status line, as
 `paint N ms`, taken from a `Telemetry` armed on hotkey and read inside `paint`
 (so it measures pixels, not window objects).
 
-> **Changed 2026-10-03: there is no backdrop capture at all.** The frosted panel
-> is gone (section 1f), so `show` no longer does any capture work — not
-> synchronously, not on the background executor. Every `paint N ms` reading taken
-> before that change included 20–50 ms of `BitBlt` plus box blur and is not a
-> baseline for the current build. Re-measure from scratch.
+> Capture and blur run on `BackgroundExecutor` at startup and after hide; the
+> show path does not wait for them. The measured 20–50 ms capture/blur cost is
+> outside the hotkey-to-first-paint path, though the first frame may use the
+> previous image if startup capture has not finished yet. Re-measure from scratch.
 
 1. Start the launcher, toggle it open ten times, and read the `paint N ms`
    figures off the status line each time.
@@ -538,9 +558,6 @@ arithmetic and the wiring compile, and neither of those is a window.
 
 So nobody assumes otherwise:
 
-- **The frosted backdrop is deferred, deliberately.** The panel is opaque and
-  nothing is captured from the screen — which also means the launcher no longer
-  photographs part of the display on every hotkey press. See section 1f.
 - **Multi-monitor and DPI are untested at runtime.** The selection logic is
   unit-tested; the DPI conversion is not tested anywhere.
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system

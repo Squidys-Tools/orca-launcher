@@ -42,6 +42,7 @@
 //! development. What keeps the process meaningful with zero windows open is the
 //! hotkey thread and the tray icon.
 
+mod backdrop;
 mod catalog;
 mod launch;
 mod providers;
@@ -50,6 +51,7 @@ mod theme;
 mod ui;
 mod win;
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,6 +97,13 @@ enum UiCommand {
     Show,
     /// The tray's Quit entry was chosen.
     Quit,
+    /// A popup hide completed; refresh its desktop sample while it is hidden.
+    RefreshBackdrop,
+}
+
+enum BackdropTarget {
+    PredictedWindow(Bounds<Pixels>, f32),
+    HiddenWindow((i32, i32, u32, u32)),
 }
 
 /// Writes a line to stdout *and* flushes it.
@@ -190,6 +199,7 @@ fn main() {
     install_tray(&commands);
 
     // A second launch, arriving from anywhere, raises this one.
+    let ui_commands = commands.clone();
     if let Err(error) = instance.start_listener(Box::new(move |command| match command {
         InstanceCommand::Show => {
             let _ = commands.send_blocking(UiCommand::Show);
@@ -201,7 +211,7 @@ fn main() {
     // let the next launch become a second primary.
     std::mem::forget(instance);
 
-    run_gpui(config, engine, receiver);
+    run_gpui(config, engine, receiver, ui_commands);
 }
 
 /// Opens the launch-history store, falling back to an in-memory one.
@@ -349,7 +359,12 @@ fn install_tray(commands: &Sender<UiCommand>) {
 }
 
 /// Starts the GPUI application and pumps [`UiCommand`]s into it.
-fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiver<UiCommand>) {
+fn run_gpui(
+    config: Config,
+    engine: Arc<Engine>,
+    receiver: async_channel::Receiver<UiCommand>,
+    commands: Sender<UiCommand>,
+) {
     // MANDATORY. `QuitMode::Default` resolves to `LastWindowClosed` on Windows,
     // so closing the popup would tear down the process. This failed twice
     // during the probe's development before it was pinned here.
@@ -358,9 +373,13 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
         let telemetry = Arc::new(Telemetry::default());
         let theme_preference = config.general.theme;
         let engine = Arc::clone(&engine);
+        let hide_sender = commands.clone();
         let launcher = cx.new(|cx: &mut Context<Launcher>| {
             let mut launcher = Launcher::new(cx, Arc::clone(&engine), Arc::clone(&telemetry));
             launcher.theme_preference = theme_preference;
+            launcher.on_hidden = Some(Arc::new(move || {
+                let _ = hide_sender.send_blocking(UiCommand::RefreshBackdrop);
+            }));
             launcher
         });
 
@@ -388,10 +407,22 @@ fn run_gpui(config: Config, engine: Arc<Engine>, receiver: async_channel::Receiv
         let pump_launcher = launcher.clone();
         let pump_telemetry = Arc::clone(&telemetry);
         cx.spawn(async move |cx| {
+            let warm = cx.update(|app| {
+                let (display, _) = win::display_under_cursor(app);
+                compact_bounds(display, app)
+            });
+            let scale = win::cursor_physical_and_scale().map_or(1.0, |(_, scale)| scale);
+            prewarm_backdrop(
+                &pump_launcher,
+                BackdropTarget::PredictedWindow(warm, scale),
+                cx,
+            );
+
             while let Ok(command) = pump_rx.recv().await {
                 match command {
                     UiCommand::Toggle => toggle(&pump_launcher, &pump_telemetry, cx),
                     UiCommand::Show => show(&pump_launcher, &pump_telemetry, cx),
+                    UiCommand::RefreshBackdrop => refresh_hidden_backdrop(&pump_launcher, cx),
                     UiCommand::Quit => {
                         cx.update(|cx| cx.quit());
                         return;
@@ -451,10 +482,10 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         // construction. Repositioned and collapsed first, because a monitor may
         // have been unplugged while the popup was hidden.
         //
-        // Nothing here touches the frame's contents. The panel is an opaque
-        // fill painted from the palette, so a show is reposition, paint,
-        // activate and nothing else.
+        // The capture was prepared while the window was hidden, so showing is
+        // reposition, paint, activate and nothing else.
         let shown = cx.update(|app| {
+            launcher.update(app, |launcher, _| launcher.set_backdrop_visible(true));
             let outcome = window.update(app, |_, window, cx| {
                 place_on_cursor(window, cx);
                 // No frame is requested by the visibility callback GPUI sends
@@ -465,6 +496,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 // handle is resolved when the real activation lands.
                 window.focus(&focus, cx);
                 if let Some(hwnd) = win::hwnd(window) {
+                    let decoration = win::clear_window_frame(hwnd).summary();
                     // Synchronously, on this thread, and *after* everything
                     // else. `Window::activate_window` cannot be used here: it
                     // spawns its work onto the window's executor, so it returns
@@ -482,7 +514,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                     // from one that never opened, and that ambiguity is what
                     // made this bug survive two rounds of guessing.
                     log(&format!(
-                        "popup: show -> {}",
+                        "popup: show -> {}; {decoration}",
                         win::describe(hwnd)
                             + if foreground {
                                 ""
@@ -509,6 +541,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
             // the window is really being retained.
             cx.update(|app| {
                 launcher.update(app, |launcher, _| {
+                    launcher.set_backdrop_visible(false);
                     launcher.forget_window();
                     launcher.shown = false;
                 });
@@ -541,6 +574,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     });
     // Building the window is the only work left on the first open.
     let create = cx.update(|app| {
+        launcher.update(app, |launcher, _| launcher.set_backdrop_visible(true));
         let entity = launcher.clone();
         let bounds = first_bounds;
 
@@ -549,7 +583,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 kind: WindowKind::PopUp,
                 focus: true,
-                show: true,
+                show: false,
                 is_resizable: false,
                 is_minimizable: false,
                 is_movable: false,
@@ -557,7 +591,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                 // clears the render target to `[0, 0, 0, 0]` for every
                 // non-opaque appearance and presents through a
                 // `DXGI_ALPHA_MODE_PREMULTIPLIED` Direct Composition swap
-                // chain, so the shadow margin around the panel is genuinely
+                // chain, so the rounded panel corners are genuinely
                 // see-through instead of black. See `ui`'s module docs.
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
@@ -576,15 +610,12 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
             let hwnd = window
                 .update(app, |_, window, cx| {
                     let handle = win::hwnd(window);
-                    place_on_cursor(window, cx);
                     window.focus(&focus, cx);
-                    window.activate_window();
                     // Two Win32 touches on the window's own decoration, both of
                     // them undoing something DWM does to a frameless window.
-                    // The summary is *measured* — DWM is asked what it thinks
-                    // afterwards — because a `Set` returning success has
-                    // already been caught claiming a frame was removed when it
-                    // was not.
+                    // Do both while the HWND is hidden: GPUI applies the
+                    // transparent appearance during open_window, so showing it
+                    // first exposes the native frame for at least one frame.
                     let unrounded = handle.is_some_and(win::round_corners);
                     let decoration = match handle {
                         Some(hwnd) => win::clear_window_frame(hwnd).summary(),
@@ -594,6 +625,7 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
                         "popup: panel rounds itself; DWM corner rounding \
                          suppressed={unrounded}; {decoration}"
                     ));
+                    window.activate_window();
                     handle
                 })
                 .unwrap_or(None);
@@ -613,7 +645,10 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
         Err(error) => {
             log(&format!("popup: open failed: {error:?}"));
             cx.update(|app| {
-                launcher.update(app, |launcher, _| launcher.shown = false);
+                launcher.update(app, |launcher, _| {
+                    launcher.set_backdrop_visible(false);
+                    launcher.shown = false;
+                });
             });
         }
     }
@@ -632,8 +667,6 @@ fn hide(launcher: &Entity<Launcher>, cx: &mut AsyncApp) {
     let action = cx.update(|app| launcher.update(app, |launcher, _| launcher.hide()));
 
     match action {
-        // Both arms below end with the window hidden. Which one ran matters
-        // only because `DestroyWindow` leaves nothing to show next time.
         HideAction::Retained => log("popup: hidden (window retained)"),
         HideAction::NothingShown => log("popup: hide requested while nothing was shown"),
         HideAction::DestroyWindow => {
@@ -701,6 +734,83 @@ fn spawn_command_pump(
         })
         .map_err(|error| degraded("command pump thread", error))
         .ok();
+}
+
+fn prewarm_backdrop(launcher: &Entity<Launcher>, target: BackdropTarget, cx: &mut AsyncApp) {
+    let generation = cx.update(|app| {
+        launcher.update(app, |launcher, _| {
+            launcher.backdrop_generation = launcher.backdrop_generation.wrapping_add(1);
+            launcher.backdrop_generation
+        })
+    });
+    let target_name = match &target {
+        BackdropTarget::PredictedWindow(_, _) => "startup region",
+        BackdropTarget::HiddenWindow(_) => "hidden window region",
+    };
+    let visible = cx.update(|app| launcher.read(app).backdrop_visible.clone());
+    let capture = cx.background_executor().spawn(async move {
+        if visible.load(Ordering::Acquire) {
+            return None;
+        }
+        let backdrop = match target {
+            BackdropTarget::PredictedWindow(bounds, scale) => {
+                crate::backdrop::capture(bounds, scale)
+            }
+            BackdropTarget::HiddenWindow(rect) => crate::backdrop::capture_hidden_window(rect),
+        };
+        if visible.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(backdrop)
+        }
+    });
+    let launcher = launcher.clone();
+    cx.spawn(async move |cx| {
+        let Some(backdrop) = capture.await else {
+            log("backdrop: capture skipped because the popup is visible");
+            return;
+        };
+        let captured = backdrop.image.is_some();
+        let took_ms = backdrop.took_ms;
+        let installed = cx.update(|app| {
+            launcher.update(app, |launcher, cx| {
+                if launcher.backdrop_generation != generation {
+                    return false;
+                }
+                launcher.backdrop = backdrop.image;
+                cx.notify();
+                true
+            })
+        });
+        if installed {
+            log(&format!(
+                "backdrop: {} in {took_ms:.1} ms from {target_name}",
+                if captured {
+                    "captured and blurred"
+                } else {
+                    "unavailable, using the tinted panel fallback"
+                },
+            ));
+        } else {
+            log("backdrop: stale capture discarded after a newer request");
+        }
+    })
+    .detach();
+}
+
+fn refresh_hidden_backdrop(launcher: &Entity<Launcher>, cx: &mut AsyncApp) {
+    let rect = cx.update(|app| {
+        launcher.read(app).hwnd.and_then(|hwnd| {
+            (!win::is_visible(hwnd))
+                .then(|| win::physical_window_rect(hwnd))
+                .flatten()
+        })
+    });
+    if let Some(rect) = rect {
+        prewarm_backdrop(launcher, BackdropTarget::HiddenWindow(rect), cx);
+    } else {
+        log("backdrop: hidden window bounds unavailable; keeping the previous image");
+    }
 }
 
 /// Moves and collapses the popup to its fixed vertical anchor on the cursor's monitor.
@@ -773,12 +883,9 @@ mod tests {
 
     use super::{
         build_engine, compact_anchor_y, spawn_command_pump, UiCommand, WINDOW_COMPACT_HEIGHT,
-        WINDOW_WIDTH,
+        WINDOW_HEIGHT, WINDOW_WIDTH,
     };
-    // The panel dimensions and the margin are not used outside this module, so
-    // they are imported here rather than at the crate root where they would be
-    // dead code in the binary.
-    use crate::ui::{FRAME_MARGIN, POPUP_HEIGHT, POPUP_WIDTH, WINDOW_HEIGHT};
+    use crate::ui::{POPUP_HEIGHT, POPUP_WIDTH};
 
     #[test]
     fn the_command_pump_keeps_draining_across_a_long_idle_period() {
@@ -978,15 +1085,11 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_the_panel_plus_a_shadow_margin() {
-        // The panel is 660 wide, and the window is that plus 32px of transparent
-        // margin on each side. The margin is not padding: the widest shadow
-        // blur is 56px, so a window sized to the panel would clip its own
-        // shadow into a hard rectangle. See `ui::FRAME_MARGIN`.
+    fn the_window_matches_the_panel_bounds() {
         assert_eq!(POPUP_WIDTH, 660.0);
-        assert_eq!(WINDOW_WIDTH, POPUP_WIDTH + FRAME_MARGIN * 2.0);
-        assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT + FRAME_MARGIN * 2.0);
-        assert_eq!(WINDOW_COMPACT_HEIGHT, 128.0);
+        assert_eq!(WINDOW_WIDTH, POPUP_WIDTH);
+        assert_eq!(WINDOW_HEIGHT, POPUP_HEIGHT);
+        assert_eq!(WINDOW_COMPACT_HEIGHT, 64.0);
     }
 
     #[test]
@@ -1013,11 +1116,8 @@ mod tests {
 
     #[test]
     fn the_window_fits_the_smallest_display_we_support() {
-        // The failure this guards against is quiet: the panel alone was a
-        // sensible size, and only overflowed once the shadow margin was added
-        // on all four sides. Windows then clamps the window to the work area,
-        // which crops the panel rather than failing, so the launcher looks
-        // subtly wrong on exactly the machines least able to spare the pixels.
+        // Windows silently clamps oversized windows to the work area, which
+        // crops the panel rather than failing on exactly the smallest displays.
         let (width, height) = SMALLEST_DISPLAY;
         assert!(
             WINDOW_WIDTH <= width,

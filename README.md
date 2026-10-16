@@ -11,8 +11,7 @@ tray between uses and can be started at login.
 
 Working today:
 
-- The popup and its frame — a rounded panel in a transparent window larger than
-  itself, so the drop shadow is not clipped.
+- The popup — a rounded translucent panel in a per-pixel transparent window.
 - Global hotkey, tray icon and menu, single-instance guard, autostart.
 - Installed applications, commands and aliases from `config.toml`, environment
   variables, and file and folder search in the user's standard folders by default.
@@ -21,9 +20,9 @@ Working today:
 
 Not built: clipboard, web search, result icons, a settings window, an installer.
 The calculator ships — type an expression and <kbd>Enter</kbd> puts the answer on
-the clipboard. The frosted-glass backdrop was deliberately
-[removed](docs/ARCHITECTURE.md) while the feature list was this short; it is
-deferred, not abandoned.
+the clipboard. The frosted-glass backdrop is implemented again; its Windows
+capture and multi-monitor behavior still need the manual checks in
+[`docs/MANUAL-CHECKS.md`](docs/MANUAL-CHECKS.md).
 
 Two documents matter more than this one:
 
@@ -137,8 +136,8 @@ one phase per milestone with a checkable exit condition:
 0. **The shell** — mostly built; the ten-cycle toggle check and the tray icon are
    still unverified at runtime.
 1. **Sources worth having** — clipboard, calculator, web search, aliases.
-2. **Looking like the reference** — result icons, row polish, the frosted
-   backdrop.
+2. **Looking like the reference** — result icons and row polish. The frosted
+   backdrop is implemented, pending its Windows manual check.
 3. **Configuration and control** — a settings window, so the ranking weights can
    move without a rebuild.
 4. **Shipping** — per-user installer, self-update, and the DPI and multi-monitor

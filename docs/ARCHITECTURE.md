@@ -284,7 +284,7 @@ each item names the gap it fills:
 | `SetWindowPos` | `Window::set_position` does not exist |
 | `GetCursorPos` + `MonitorFromPoint` + `GetDpiForMonitor` | "centre on the cursor's monitor" needs a cursor read |
 | `ShellExecuteW` | neither crate opens a `LaunchTarget` |
-| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would clip the panel's drop shadow |
+| `DwmSetWindowAttribute` | suppressing the Win11 default corner rounding, which would replace the panel's painted radius |
 
 Six functions, in one file, the only `unsafe` in the crate, each with the gap
 named above it. The right home for all six is `orca-win`, which was already
@@ -423,20 +423,22 @@ a `Send` future, and any future holding a GPUI type is `!Send`, because
 polling, single-instance listeners, hotkey handling, telemetry flushes — cannot
 live on the foreground executor. It is not a slow path, it is a dead one.
 
-## The window is transparent, and larger than the panel
+## The window is transparent and panel-sized
 
 The popup is a rounded panel floating over the desktop rather than a window with
 a title bar, and three separate decisions have to hold for that to come out
 right. All three are in `crates/orca/src/ui.rs` and `main.rs`; recording them
 because each one is a plausible-looking thing to "simplify" back.
 
-**The window is bigger than the panel, on all four sides, by
-`ui::FRAME_MARGIN`.** Not decoration. The widest shadow in
-`Theme::panel_shadows` is a 56px blur offset 24px down, and a window sized to
-the panel clips its own shadow into a hard straight-edged rectangle. The
-consequence is that every placement calculation — `Bounds::centered`,
-`place_on_cursor`, the `rect=` in the show log — is in *window* coordinates, not
-panel coordinates, and the panel is centred inside it.
+**The expanded window matches the panel bounds.** The custom drop shadow and
+DWM's automatic shadow are disabled, so there is no shadow margin to reserve.
+With an empty query, the window shrinks to the 64px search bar; its top-left
+stays at the expanded panel's anchor so typing can expand downward without
+moving the panel.
+
+The outer panel has no separate hairline border: over a bright captured desktop,
+the translucent edge already reads as a gray box. Theme borders remain on the
+interior separators and footer pills.
 
 **`WindowOptions::window_background` is `Transparent`, and the root view is not
 painted.** `gpui_windows` clears the render target to `[0, 0, 0, 0]` for every
@@ -451,10 +453,9 @@ inside the panel and on an opaque background.
 `DWMWA_WINDOW_CORNER_PREFERENCE` looks like the answer and is not:
 
 * it is Windows 11 build 22000 and later, with a small set of radii (8px, 4px,
-  none) and no 16–20px option, which is what this design wants;
-* it rounds the **window**, and the window is deliberately larger than the panel,
-  so DWM would round the outside edge of the drop shadow — the one edge that has
-  to stay square;
+  none) and no 16px option, which is what this design uses;
+* it rounds the **window**, replacing the panel's 16px painted radius with the
+  smaller system radius;
 * it only reaches windows DWM redirects, and `gpui_windows` sets
   `WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled (the
   default; it is off only when `DISABLE_DIRECT_COMPOSITION` is set), in which
@@ -463,80 +464,92 @@ inside the panel and on an opaque background.
 Painting the radius has none of those constraints and is antialiased. The
 remaining Win32 call, `win::round_corners`, therefore *suppresses* the DWM
 preference (`DWMWCP_DONOTROUND`) rather than requesting one, so a Windows 11
-build cannot quietly reintroduce the clipped-shadow failure. It logs whether
-Windows accepted it, because that number is the only thing in the log that says
-which path the corners are taking.
+build cannot quietly replace the painted radius. The backdrop image and tint
+also each carry that radius: GPUI's `overflow_hidden` content mask is rectangular
+and does not clip their corners for them.
 
-### The frosted backdrop is gone for now, and why
+### The frosted backdrop: capture while hidden, blur off the show path
 
-**Removed 2026-10-03.** The panel was translucent and painted a blurred copy of
-the desktop behind itself. It is now an opaque card. The feature was cut while
-the launcher still has almost no features in it, on the grounds that the capture
-was the single most expensive thing on the keystroke path and the cheapest thing
-to get wrong. It is deferred, not abandoned: everything below is the reason it
-was not free, and it is the list to read before putting it back.
+**Restored 2026-10-12 after comparing native and open-source alternatives.**
+The panel is translucent over a blurred screen capture again. The capture and
+blur run on `BackgroundExecutor`: once before a popup exists, then after each
+hide. A visibility-generation check discards any pending sample if showing
+starts before it completes. The visible show path only reuses the last image,
+so the 20–50ms capture cost previously measured on that path no longer delays
+the hotkey. The tradeoff is deliberate staleness: the image represents the
+desktop at startup or hide time, not the instant the popup opens.
 
-The three modules are deleted — `orca_win::backdrop`, `orca_core::backdrop`,
-`orca::backdrop` — along with `image` as a direct dependency and the
-`Win32_Graphics_Gdi` feature on `orca-win`. `win::cursor_physical_and_scale`
-went with them; it existed only so the capture and the panel placement could not
-disagree about the cursor's monitor.
+Every capture covers the full 660×430 panel, even when the hidden window is only
+64px tall. A hidden-window refresh derives monitor scale from its measured width
+and uses the expanded panel height; stretching the compact window's measured
+height would turn the backdrop into a vertically distorted strip when results
+appear.
 
-**Why we could not use a system backdrop material.** `gpui` exposes
-`WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop,
-MicaAltBackdrop}` and `gpui_windows` implements all four through DWM. None of
-them fits, for a specific reason rather than a cautious one: they apply their
-material to the **whole window rectangle**. The window is larger than the panel,
-so a backdrop material would fill the shadow margin too and turn the rounded
-panel into a rounded *square* — worse than no material at all.
+**Why not a native Windows backdrop or a drop-in crate.** The official DWM
+`DwmEnableBlurBehindWindow` call has no blur effect on Windows 8 and later. The
+newer `DWMWA_SYSTEMBACKDROP_TYPE` material paints at the window level, while this
+panel's corner radius is painted by GPUI; a window-wide material cannot follow
+that radius and would fill its corners. It also requires Windows 11 22H2
+(build 22621). More importantly, another GPUI application reproduced the same
+backend limitation: DWM Acrylic attributes succeed but do not blur the
+DirectComposition-rendered client area; GPUI needs a backdrop-brush hook in its
+composition tree ([con-terminal#55](https://github.com/nowledge-co/con-terminal/issues/55)).
 
-**And the second obstacle, found by reading the backend rather than the docs.**
-`MicaBackdrop` goes through `DwmSetWindowAttribute`, and `gpui_windows` sets
-`WS_EX_NOREDIRECTIONBITMAP` whenever Direct Composition is enabled — the
-default, off only when `DISABLE_DIRECT_COMPOSITION` is set. DWM backdrops are
-applied to windows DWM redirects, and a DirectComposition window is not
-redirected, so the attribute may do nothing visible at all. The documentation's
-"not always supported" is doing a lot of quiet work there.
+The open-source [`backdrop-blur`](https://github.com/abdu-benayad/backdrop-blur)
+crate provides GPU blur passes for renderers that expose a sampleable scene
+texture, but its own design excludes GPUI until it adds that render hook. A
+renderer-level implementation would mean changing or forking the pinned GPUI
+backend, not adding a dependency. Whole-window helpers such as
+[`window-vibrancy`](https://github.com/tauri-apps/window-vibrancy) do not solve
+the rounded panel-corner mismatch and document Windows version/performance
+limitations. Those are larger and less reliable changes than this feature needs.
 
-**What the capture cost.** GDI `BitBlt` off the screen DC, not
-`Windows.Graphics.Capture`: the modern API shows a consent dialog and returns a
-D3D frame pool to copy out of, which for blurring a few hundred thousand pixels
-per hotkey press is the wrong trade. Even so it measured 20–50ms, and it had to
-run while the window was hidden — `BitBlt` photographs the screen, so capturing
-with the popup up captures the popup. That precondition is what made the design
-awkward rather than cheap: the work had to be moved to the hide path and the
-startup path so the show path could stay instant, which in turn made the blur
-*stale* — showing what was behind the cursor at close, not at open. A launcher
-that opens 40ms late is worse than one whose frosted panel is a frame old.
+[`GPUix`](https://github.com/remorses/gpuix) is also not a drop-in glass
+component. It is a TypeScript/React and Node binding to GPUI; its blurred-window
+[`example`](https://github.com/remorses/gpuix/blob/main/examples/blurred-window.tsx)
+sets `windowBackground: "blurred"`, and its README describes that option as
+macOS vibrancy. That is an OS-provided, window-level material, not a per-panel
+blur implementation for Windows. Using GPUix here would mean porting Orca's
+Rust UI and still would not provide the missing Windows backdrop sample. Its
+native package currently targets Windows MSVC, while Orca is pinned to GNU.
+There is a GNU escape hatch: [NAPI-RS accepts the x64 Windows GNU target](https://napi.rs/docs/cross-build),
+and a debug build of GPUix's actual native crate succeeded for that target using
+MinGW and MSYS2's `libnode.dll`. This is not a shippable validation: the debug
+addon was 637 MB, and it was not loaded under Windows. The published GPUix
+target list and CI still exclude Windows GNU; adding it also needs packaging
+fixes, because NAPI-RS CLI 3.10.4 generates the Windows GNU package with
+`libc: ["glibc"]`, which npm rejects on Windows. The release GPUI build invokes
+`fxc.exe` from the Windows SDK, so that build must run on Windows (for example,
+CI with MinGW Node and the SDK), not this Linux cross-build host. MSYS2 does
+ship a [MINGW Node runtime](https://packages.msys2.org/packages/mingw-w64-x86_64-nodejs),
+but using this route means maintaining its runtime dependencies and a custom
+package pipeline; Bun remains best-effort for N-API.
 
-**The blur was a downsample, not a Gaussian.** `soften` box-averaged by 4,
-blurred the small buffer, and let the renderer's bilinear filter stretch it back.
-The bilinear upscale is just the last box in a separable chain, so it reads like
-a wide Gaussian and costs about 16× less, because the expensive step runs on
-1/16th of the pixels. `DOWNSAMPLE = 4` was a balance with both failure
-directions visible: too large and the upscale shows as faint diagonal banding,
-too small and it stops being cheap and reappears as keystroke latency.
+The retained-window capture has two pieces: `orca_win::capture_screen_region`
+uses GDI `BitBlt` while the window is hidden, and the pure
+`orca_core::backdrop::soften` downsamples BGRA by four, box-blurs the reduced
+buffer with alpha-weighted colors, and lets the renderer bilinearly upscale it.
+GDI's reserved `BI_RGB` byte is not a defined alpha channel, so capture marks the
+screen pixels opaque before the pure blur runs. The renderer-owned desktop is
+never sampled; GDI gives us the exact panel rectangle without consent UI, and
+the pure blur remains fully testable. A later hide capture uses the HWND's
+measured physical rectangle, so moving the pointer to another monitor does not
+move the sampled region. The initial sample uses the cursor monitor before any
+window exists.
 
-**Two bugs in that code, named because they are the ones that would come back
-with it:**
+Two old failure modes remain guarded because they are easy to reintroduce:
 
-* **Alpha was normalised by the window width instead of the number of samples
-  actually taken.** At an edge the window runs off the image, so every border
-  lost opacity and the loss compounded through each pass. The visible symptom is
-  a flat image coming out with translucent edges — a dark band down the right and
-  bottom of the panel, which reads as "the shadow is wrong".
-* **A GDI handle leak waiting to happen.** A memory DC with a bitmap still
-  selected into it cannot be deleted without leaking the bitmap, and a screen DC
-  must be released with `ReleaseDC` while a memory DC is destroyed with
-  `DeleteDC`. There is no reliable query for which kind you have, so the guard
-  recorded it at creation. Getting this backwards leaks a handle on every hotkey
-  press.
+* Edge samples are divided by the number of pixels actually covered, so the
+  right and bottom borders do not fade into a dark band.
+* GDI handles remember their origin and are released with the matching API;
+  selected bitmaps are restored before their memory DC is deleted.
 
-**What to do when it comes back.** Keep the capture off the show path — the
-blur is the cheap part of this feature and the latency is not. Do not
-reintroduce `Win32_Graphics_Gdi` on `orca-win` for it: `orca` calls
-`MonitorFromPoint` and now declares that feature itself, because a feature
-another crate in the graph happens to enable is not a dependency.
+The capture flushes the calling thread's GDI batch after `BitBlt` and before
+copying the DIB bits, so a queued blit cannot leave the sample stale or partial.
+
+The panel tint is translucent over the image, and the theme tests measure text
+contrast over both black and white backdrops. If a capture fails, the themed
+fill remains non-fatal and the launcher still opens.
 
 ### The window frame: `Transparent` asks Windows for a border
 
@@ -559,11 +572,21 @@ rather than pre-existing — choosing transparency is precisely what asks Window
 for it. Read it in `gpui_windows/src/window.rs`, `set_background_appearance`
 and `set_window_composition_attribute`.
 
-The two mechanisms are independent, which is what makes it fixable in six lines:
-the per-pixel alpha comes from the Direct Composition swap chain being cleared
-to `[0, 0, 0, 0]`, **not** from the accent policy. So `win::clear_window_frame`
-sends `accent_state = 0` (`WCA_ACCENT_ENABLE_NONE`) after GPUI has set the
-appearance. The frame goes, the shadow margin stays transparent.
+The accent border and DWM's frame are independent. The per-pixel alpha comes
+from the Direct Composition swap chain being cleared to `[0, 0, 0, 0]`, **not**
+from the accent policy. `win::clear_window_frame` resets the accent policy and
+disables DWM's border/shadow after GPUI sets the appearance; doing only one of
+those left a faint rectangular edge. The reset is repeated on each show because
+the retained popup can outlive its original composition state.
+
+The order is load-bearing. In this GPUI pin, the Windows platform window applies
+its initial placement (and can make it visible) before `gpui::Window::new`
+applies `window_background`. Orca therefore opens the first HWND hidden, resets
+the accent and DWM decoration, and only then calls `Window::activate_window()`.
+On retained shows, `clear_window_frame` must likewise run before `ShowWindow`.
+This prevents Windows from presenting a frame before Orca removes it; it does
+not replace the manual check below, which confirms the visible result and the
+read-back log values on Windows.
 
 `SetWindowCompositionAttribute` is resolved from `user32.dll` at runtime and
 cached, because it is not exported by name in any import library. The
@@ -578,30 +601,20 @@ until a human looks at a screenshot. Anything that reads as a window
 *decoration* — border, shadow, corner — is DWM's business, not the renderer's,
 and has to be checked separately from anything that reads as pixel content.
 
-### The panel is opaque, and the fills on top of it are not
+### The panel tint, and the fills on top of it
 
-The panel fill itself is opaque — it is a card sitting over the desktop, and
-anything with an alpha there would put the desktop's own text behind the
-launcher's text. So a contrast check against the panel's RGB needs no help.
+The panel fill is translucent over the captured desktop, so `theme.rs`'s
+contrast tests composite it over both black and white before measuring text.
+Those two extremes bound the unknown pixels behind the launcher, and the tests
+also enforce an alpha range: too opaque and the frosted backdrop disappears, too
+transparent and `dim` stops clearing 4.5:1 over a light wallpaper.
 
-Everything painted *inside* the panel is a different matter. The selection fill,
-the footer pills and the border are alpha-blended over the panel rather than
-replacing it: a selection is a lightening of the card it sits on, not a colour of
-its own. So `theme.rs`'s tests still carry their own source-over, and assert every
-pairing against the fill composited onto the panel.
-
-The subtlety that cost a test, and that is worth keeping for when the frosted
-backdrop comes back: a selection highlight does not sit on the desktop, it sits on
-the panel. Compositing a 10%-white highlight directly against a white wallpaper
-scores it at 1.00:1 and produces a failing test that describes nothing the user
-would ever see. It is the strongest argument in this file for testing against the
-real compositing chain rather than against the constants that feed it.
-
-While the panel *was* translucent, that same test also bounded its alpha from both
-sides: too opaque and the translucency was gone, too transparent and `dim` stopped
-clearing 4.5:1 over a light wallpaper. With the backdrop removed, the panel's
-alpha is simply 1.0 and `the_panel_is_opaque` asserts it — which is not redundant,
-because an alpha of 0.9 passes every other test in the file.
+Everything painted *inside* the panel is layered over that tint rather than
+replacing it. The selection fill, footer pills and border are alpha-blended, so
+the contrast tests composite the panel and selection fills over both backdrops.
+A selection highlight does not sit directly on the desktop: testing it against
+the real compositing chain avoids scoring the fill against a surface the user
+never sees.
 
 ## The second provider seam: answers, not candidates
 
@@ -966,4 +979,3 @@ store, and `criterion` as a dev-dependency for the ranking benchmarks. The
 `bundled` feature is a deliberate trade: the SQLite amalgamation compiles into
 the binary, so a user's launcher works on a machine where nothing has been
 installed, at the cost of a slower first build.
-
