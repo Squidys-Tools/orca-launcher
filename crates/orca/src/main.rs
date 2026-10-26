@@ -44,6 +44,7 @@
 
 mod backdrop;
 mod catalog;
+mod icons;
 mod launch;
 mod providers;
 mod text;

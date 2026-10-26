@@ -684,6 +684,37 @@ at the machine just copied. What the tests cover is the arithmetic — how many
 bytes `GlobalAlloc` is asked for — because that part is pure and is where the
 off-by-one lives. The rest is a manual check in `docs/MANUAL-CHECKS.md`.
 
+## Result icons: the shell's, one at a time
+
+A row's icon is whatever Explorer would show, from `SHGetFileInfoW` in
+`orca-win/src/icon.rs`. What the icon *is* is decided in pure code,
+`orca_core::icon_key`: an application or a self-iconed file (`.exe`, `.lnk`,
+`.ico`, `.url`, …) is keyed by path, every other file by its lowercase
+extension, and every folder shares one key. A list of forty `.txt` files is one
+shell call.
+
+`IconCache` in `orca-core` holds every key that was ever asked for, including the
+ones that failed, so a key is loaded at most once per process and a stale
+shortcut is not retried on every keystroke. Loads start when results land, never
+from `render`, and run on the background executor in batches of eight, in row
+order, so the visible rows fill first.
+
+**`SHGetFileInfoW` fails when called from several threads at once.** With two or
+three lookups in flight, extension and `.exe` requests came back with no icon
+while the same request alone succeeded. The gate's parallel test runner is what
+found it. Every lookup now holds one process-wide lock; the
+`concurrent_loads_all_succeed` test fails without it.
+
+The pixels need one repair. A 32-bit icon's colour bitmap is straight-alpha
+BGRA, which is what `RenderImage` stores, so it passes through. An older icon has
+an all-zero alpha channel and keeps its transparency in the 1-bit mask; without
+`apply_mask` it would paint as an invisible square.
+
+Runtime check worth knowing: a process launched with `Start-Process
+-WindowStyle Hidden` gets `SW_HIDE` in its `STARTUPINFO`, and Windows applies it
+to the process's *first* `ShowWindow`. The first popup then takes focus while
+`IsWindowVisible` is false. That is the harness, not the launcher.
+
 ## `Window::activate_window` is asynchronous, and that matters
 
 `Window::activate_window()` looks like the obvious way to bring the popup to the

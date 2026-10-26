@@ -35,6 +35,7 @@
 //! | [`TrayIcon`] | the tray menu and its actions |
 //! | [`installed_apps`] | a `ResultProvider` returning `ResultItem`s with `Source::Application` |
 //! | [`capture_screen_region`] | reading the screen behind a hidden popup |
+//! | [`shell_icon`] | the icon a result row shows, keyed by `orca_core::IconKey` |
 //! | [`WindowHandle`] | whatever the UI layer produces for a window |
 
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -49,6 +50,7 @@ mod clipboard;
 mod decoration;
 mod foreground;
 mod hotkey;
+mod icon;
 mod single_instance;
 mod tray;
 mod wide;
@@ -69,6 +71,7 @@ pub use hotkey::{
     hotkey_code, modifier_flags, virtual_key, GlobalHotkey, HotkeyBackend, HotkeyError,
     Win32GlobalHotkey, Win32HotkeyBackend,
 };
+pub use icon::{shell_icon, IconError, IconImage, ShellIcon};
 pub use single_instance::{
     InstanceCommand, SingleInstanceError, Win32SingleInstance, DEFAULT_HANDSHAKE_TIMEOUT,
     DEFAULT_MUTEX_NAME, DEFAULT_PIPE_NAME, SECONDARY_INSTANCE_EXIT_CODE,

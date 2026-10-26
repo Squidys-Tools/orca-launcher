@@ -506,6 +506,30 @@ was moved out of the trait methods into the pure functions in
 all. The thin GPUI adapters left behind are therefore unverified by
 construction, and section 1 and section 4 above are where you check them.
 
+## 6.6 Result icons
+
+The gate proves the shell hands back non-empty pixels for a folder, an
+extension, and an `.exe`, including from eight threads at once. It does not see
+a row.
+
+- [ ] Type `note`, then `txt`, then a folder name.
+      **Expected:** applications show their own icon, files the icon Explorer
+      shows for their type, folders a folder. Colours are right (a blue icon is
+      not orange: that would be the BGRA/RGBA swap), and edges are transparent
+      against the panel rather than sitting on a black or white square.
+- [ ] Rows without an icon — `PATH`-style commands, a calculator answer —
+      keep an empty slot, and their titles line up with the rows that have one.
+- [ ] Icons may appear a moment after the rows; they must never move the rows.
+- [ ] `run.log` has `icons: loaded N of M in … ms` per batch. A failure names
+      the first key that failed; a shortcut whose target no longer exists is an
+      expected failure and leaves a blank slot.
+- [ ] Repeat the same query. **Expected:** no new `icons:` line — a key is
+      loaded once per process.
+- [ ] At 150% scaling the icons are sharp, not upscaled 32px blurs.
+- [ ] Section 3's memory plateau still holds after browsing many different
+      queries: icons are cached for the life of the process, one entry per app
+      or `.exe` and one per file extension.
+
 ## 6.5 The calculator: a row that is an answer
 
 Section 6 above is about how the ranking *feels*. This is about whether the
@@ -563,7 +587,7 @@ So nobody assumes otherwise:
 - **A real tray icon.** `TrayIconSource::Application` uses the stock system
   icon, which is deliberately never destroyed. Shipping a `.ico` via
   `TrayIconSource::File` is untested.
-- **No result icons, no fuzzy-match tuning UI, no config file of your own.**
+- **No fuzzy-match tuning UI, no config file of your own.**
   `[files]` and `[commands]` come from `config.toml`; the launcher falls back to
   defaults with a `config.toml … unavailable` line if it cannot read one.
 - **A real `Ctrl+A`.** See section 4.

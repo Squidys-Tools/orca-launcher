@@ -71,6 +71,7 @@
 pub mod backdrop;
 pub mod config;
 pub mod frecency;
+pub mod icon;
 pub mod matching;
 pub mod model;
 pub mod policy;
@@ -80,6 +81,7 @@ pub mod store;
 mod text;
 
 pub use frecency::{Frecency, Timestamp};
+pub use icon::{icon_key, IconCache, IconKey};
 pub use matching::{
     classify, match_score, match_score_with_subtitle, MatchKind, MatchQuality, BROWSE_SCORE,
     CONTAINS_SCORE, EXACT_SCORE, FUZZY_CEILING, FUZZY_FLOOR, PREFIX_SCORE, WORD_BOUNDARY_SCORE,

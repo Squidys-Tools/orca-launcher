@@ -296,7 +296,7 @@ impl ShortcutResolver for ShellLinkResolver {
 }
 
 /// Initialises COM for the current thread and uninitialises it on drop.
-struct ComApartment {
+pub(crate) struct ComApartment {
     /// Whether this guard performed the initialisation. When COM was already up
     /// in a different apartment model, initialising fails with
     /// `RPC_E_CHANGED_MODE`; proceeding is correct, and uninitialising would
@@ -305,7 +305,7 @@ struct ComApartment {
 }
 
 impl ComApartment {
-    fn enter() -> Option<ComApartment> {
+    pub(crate) fn enter() -> Option<ComApartment> {
         // SAFETY: passes no interface pointer, so there is nothing to marshal
         // and the only state it changes is this thread's apartment.
         let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };

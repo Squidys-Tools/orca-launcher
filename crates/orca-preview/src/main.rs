@@ -16,6 +16,18 @@ mod launch {
     }
 }
 
+mod icons {
+    use std::sync::Arc;
+
+    use gpui::RenderImage;
+    use orca_core::IconKey;
+
+    // No shell to ask on Linux: every row keeps its empty icon slot.
+    pub fn load_all(keys: Vec<IconKey>) -> Vec<(IconKey, Option<Arc<RenderImage>>)> {
+        keys.into_iter().map(|key| (key, None)).collect()
+    }
+}
+
 mod win {
     pub type Hwnd = ();
 
