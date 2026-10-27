@@ -32,11 +32,13 @@ jobs:
 
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          # UCRT64, not MINGW64: MSYS2 stopped shipping nodejs for MINGW64,
+          # so the package below no longer resolves there.
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-nodejs
           path-type: inherit
 
       - name: Prefer the MINGW runtime and linker
@@ -58,7 +60,7 @@ jobs:
           rustc --version --verbose
           test -f "$MINGW_PREFIX/bin/libnode.dll"
           test -f "$MINGW_PREFIX/lib/libnode.dll.a"
-          "$MINGW_PREFIX/bin/node.exe" -e 'const v=process.config?.variables ?? {}; if (process.platform !== "win32" || process.arch !== "x64" || v.shlib_suffix !== "dll.a") throw new Error(`Expected MSYS2 MINGW x64 Node, got ${process.execPath}: ${JSON.stringify(v)}`)'
+          "$MINGW_PREFIX/bin/node.exe" -e 'const v=process.config?.variables ?? {}; if (process.platform !== "win32" || process.arch !== "x64" || v.shlib_suffix !== "dll.a") throw new Error(`Expected MSYS2 UCRT64 x64 Node, got ${process.execPath}: ${JSON.stringify(v)}`)'
 
       - name: Restore GPUix build output
         uses: actions/cache/restore@v4
