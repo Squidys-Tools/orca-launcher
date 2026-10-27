@@ -18,7 +18,8 @@ Working today:
 - Ranking by match tier — prefix, word boundary, substring, fuzzy — weighted by
   launch frequency and recency, with a SQLite usage store behind it.
 
-Not built: clipboard, web search, result icons, a settings window, an installer.
+Not built: clipboard, web search, a settings window, an installer. Result rows
+show the shell's icon for applications, files, and folders.
 The calculator ships — type an expression and <kbd>Enter</kbd> puts the answer on
 the clipboard. The frosted-glass backdrop is implemented again; its Windows
 capture and multi-monitor behavior still need the manual checks in

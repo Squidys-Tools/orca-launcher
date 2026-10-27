@@ -61,6 +61,7 @@ use gpui::*;
 use orca_core::config::ThemePreference;
 use orca_core::RankedItem;
 use orca_core::ResultItem;
+use orca_core::{icon_key, IconCache};
 
 use crate::catalog::{Engine, Generation};
 use crate::text;
@@ -133,6 +134,13 @@ const STATUS_HEIGHT: f32 = 44.0;
 /// Height of a footer pill, and of the keycap inside it.
 const PILL_HEIGHT: f32 = 32.0;
 const KEYCAP_HEIGHT: f32 = 22.0;
+/// The icon at the left of a result row. Every row reserves the slot, with or
+/// without an icon, so titles stay aligned while icons load and on rows that
+/// have none.
+const ICON_SIZE: f32 = 24.0;
+/// How many icons one background task loads. Small enough that the first
+/// screenful lands before the rest of the list is read.
+const ICON_BATCH: usize = 8;
 
 /// The placeholder shown when the query is empty.
 const PLACEHOLDER: &str = "Search for apps and commands…";
@@ -259,6 +267,9 @@ pub struct Launcher {
     /// Requests a fresh sample after either the hotkey or Escape hides the window.
     pub on_hidden: Option<Arc<dyn Fn() + Send + Sync>>,
 
+    /// Result-row icons, loaded once per key and kept for the process.
+    pub icons: IconCache<Arc<RenderImage>>,
+
     /// Shared with the background threads.
     pub engine: Arc<Engine>,
     /// Shared with the frame that measures the popup's latency.
@@ -321,6 +332,7 @@ impl Launcher {
             backdrop_generation: 0,
             backdrop_visible: Arc::new(AtomicBool::new(false)),
             on_hidden: None,
+            icons: IconCache::default(),
             engine,
             telemetry,
         }
@@ -961,6 +973,10 @@ impl Render for LauncherView {
         let query_empty = self.launcher.read(cx).query.is_empty();
         let composing = self.launcher.read(cx).composing.is_some();
         let rows = self.launcher.read(cx).rows.clone();
+        let icons = rows
+            .iter()
+            .map(|row| icon_key(&row.item).and_then(|key| self.launcher.read(cx).icons.get(&key)))
+            .collect::<Vec<_>>();
         let selected = self.launcher.read(cx).selected;
         let searching = self.launcher.read(cx).searching;
         let error = self.launcher.read(cx).error.is_some();
@@ -1027,7 +1043,9 @@ impl Render for LauncherView {
                     .child(self.search_field(theme, &focus, entity, telemetry))
                     .when(!query_empty, |panel| {
                         panel
-                            .child(self.result_list(&rows, selected, theme, searching, error))
+                            .child(
+                                self.result_list(&rows, &icons, selected, theme, searching, error),
+                            )
                             .child(Self::status_bar(
                                 status, latency, composing, error, open, theme,
                             ))
@@ -1173,6 +1191,7 @@ impl LauncherView {
     fn result_list(
         &mut self,
         rows: &[RankedItem],
+        icons: &[Option<Arc<RenderImage>>],
         selected: usize,
         theme: Theme,
         searching: bool,
@@ -1214,6 +1233,7 @@ impl LauncherView {
 
         list.children(rows.iter().enumerate().map(|(index, row)| {
             let is_selected = index == selected;
+            let icon = icons.get(index).cloned().flatten();
             // The source name sits on the right rather than in a left gutter.
             // A fixed-width gutter existed to keep titles aligned across rows;
             // a right-aligned column needs no such reservation, which is where
@@ -1222,11 +1242,23 @@ impl LauncherView {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_4()
+                .gap_3()
                 .px_4()
                 .h(px(ROW_HEIGHT))
                 .rounded(px(10.))
                 .when(is_selected, |style| style.bg(theme.selection))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(ICON_SIZE))
+                        .when_some(icon, |slot, image| {
+                            slot.child(
+                                img(ImageSource::Render(image))
+                                    .object_fit(ObjectFit::Contain)
+                                    .size_full(),
+                            )
+                        }),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -1321,10 +1353,41 @@ pub fn request_search(launcher: &mut Launcher, cx: &mut Context<Launcher>) {
             launcher.error = outcome.error;
             launcher.searching = false;
             launcher.clamp_selection();
+            request_icons(launcher, cx);
             cx.notify();
         });
     })
     .detach();
+}
+
+/// Loads, in the background, the icons of the current rows that have never
+/// been asked for.
+///
+/// Called when results land rather than from `render`, which must not start
+/// work. Keys are loaded in row order and in small batches, so the visible
+/// rows fill in first. A loaded icon is kept even if the query has moved on:
+/// it is keyed by what it depicts, not by the search that asked for it.
+fn request_icons(launcher: &mut Launcher, cx: &mut Context<Launcher>) {
+    let missing = launcher
+        .icons
+        .claim(launcher.rows.iter().filter_map(|row| icon_key(&row.item)));
+    for batch in missing.chunks(ICON_BATCH) {
+        let batch = batch.to_vec();
+        let weak = cx.weak_entity();
+        cx.spawn(async move |_, cx| {
+            let background = cx.background_executor().clone();
+            let loaded = background
+                .spawn(async move { crate::icons::load_all(batch) })
+                .await;
+            let _ = weak.update(cx, |launcher, cx| {
+                for (key, icon) in loaded {
+                    launcher.icons.fill(key, icon);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 #[cfg(test)]
