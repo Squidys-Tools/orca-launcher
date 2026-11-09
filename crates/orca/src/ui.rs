@@ -142,8 +142,13 @@ const ICON_SIZE: f32 = 24.0;
 /// screenful lands before the rest of the list is read.
 const ICON_BATCH: usize = 8;
 
-/// The placeholder shown when the query is empty.
-const PLACEHOLDER: &str = "Search for apps and commands…";
+/// The placeholder shown when the query is empty. Names files because file
+/// search is on by default; a placeholder that omits them undersells the box.
+const PLACEHOLDER: &str = "Search apps, files, and commands…";
+/// Shown while a search is in flight, in the status line and the empty list.
+const SEARCHING: &str = "Searching…";
+/// Shown when the query matched nothing.
+const NO_MATCHES: &str = "No matches";
 
 /// The magnifier drawn at the left of the search field.
 ///
@@ -229,7 +234,14 @@ pub struct Launcher {
     /// Index into `rows`.
     pub selected: usize,
     /// The last completed search's rows.
-    pub rows: Vec<RankedItem>,
+    ///
+    /// Shared rather than owned because `render` hands them to the row builder
+    /// on every frame, and a frame is every keystroke, caret blink, and icon
+    /// arrival. Cloning the pointer is free; cloning 50 rows of strings is not.
+    pub rows: Arc<[RankedItem]>,
+    /// The result list's scroll state, so keyboard selection can bring the
+    /// selected row into view. Only about seven of the 50 rows fit.
+    pub results_scroll: ScrollHandle,
     /// How many candidates the last search matched, before truncation.
     pub matches: usize,
     /// Bumped on every query change; stale background results are dropped.
@@ -316,7 +328,8 @@ impl Launcher {
             caret: 0,
             composing: None,
             selected: 0,
-            rows: Vec::new(),
+            rows: Arc::default(),
+            results_scroll: ScrollHandle::new(),
             matches: 0,
             generation: Generation::default(),
             searching: false,
@@ -393,19 +406,6 @@ impl Launcher {
         }
     }
 
-    /// Clamps the selection into the current rows.
-    ///
-    /// Called after every result change. A selection index of 3 with two rows
-    /// would index out of bounds on Enter and render no highlighted row at all,
-    /// which reads as "the keyboard stopped working".
-    pub fn clamp_selection(&mut self) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.rows.len() {
-            self.selected = self.rows.len() - 1;
-        }
-    }
-
     /// Moves the selection by `delta` rows, saturating at both ends.
     ///
     /// Saturating rather than wrapping: wrapping means holding <kbd>Down</kbd>
@@ -418,6 +418,25 @@ impl Launcher {
         let last = self.rows.len() - 1;
         let next = self.selected as isize + delta;
         self.selected = next.clamp(0, last as isize) as usize;
+        // Deferred to the next prepaint and scrolls only as far as needed, so
+        // moving within the visible rows does not move the list at all.
+        self.results_scroll.scroll_to_item(self.selected);
+    }
+
+    /// Installs a fresh search's rows, selecting the best one.
+    ///
+    /// The selection goes back to the top rather than keeping its index: the
+    /// rows were reordered by the new query, so index 3 now names a different
+    /// item, and <kbd>Enter</kbd> after typing must open the best match, not
+    /// whatever slid into the old slot. The scroll goes with it, or the newly
+    /// selected top row could be above the viewport.
+    pub fn show_results(&mut self, rows: Vec<RankedItem>, matches: usize, error: Option<String>) {
+        self.rows = rows.into();
+        self.matches = matches;
+        self.error = error;
+        self.searching = false;
+        self.selected = 0;
+        self.results_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     /// Deletes the character before the caret.
@@ -481,10 +500,10 @@ impl Launcher {
             return error.clone();
         }
         if self.searching {
-            return "searching...".to_owned();
+            return SEARCHING.to_owned();
         }
         if self.matches == 0 {
-            return "no matches".to_owned();
+            return NO_MATCHES.to_owned();
         }
         let shown = self.rows.len();
         if shown < self.matches {
@@ -684,10 +703,9 @@ impl Element for QueryInput {
         cx: &mut App,
     ) -> QueryLayout {
         let launcher = self.launcher.read(cx);
-        let query = launcher.query.clone();
         let caret = launcher.caret;
         let composing = launcher.composing.clone();
-        let empty = query.is_empty();
+        let empty = launcher.query.is_empty();
 
         let text = launcher.display_text();
         let base = TextRun {
@@ -818,6 +836,18 @@ impl LauncherView {
     pub fn new(launcher: Entity<Launcher>) -> LauncherView {
         LauncherView { launcher }
     }
+}
+
+/// What [`LauncherView::result_list`] draws, gathered by `render` in one read
+/// of the launcher so the builder never holds a borrow of the entity.
+struct ResultList<'a> {
+    rows: &'a [RankedItem],
+    icons: &'a [Option<Arc<RenderImage>>],
+    selected: usize,
+    theme: Theme,
+    searching: bool,
+    error: bool,
+    scroll: &'a ScrollHandle,
 }
 
 /// Which way a caret movement goes.
@@ -969,31 +999,30 @@ impl Render for LauncherView {
         self.launcher
             .update(cx, |launcher, _| launcher.refresh_theme(window));
 
-        let theme = self.launcher.read(cx).theme;
-        let query_empty = self.launcher.read(cx).query.is_empty();
-        let composing = self.launcher.read(cx).composing.is_some();
-        let rows = self.launcher.read(cx).rows.clone();
+        let launcher = self.launcher.read(cx);
+        let theme = launcher.theme;
+        let query_empty = launcher.query.is_empty();
+        let composing = launcher.composing.is_some();
+        let rows = Arc::clone(&launcher.rows);
         let icons = rows
             .iter()
-            .map(|row| icon_key(&row.item).and_then(|key| self.launcher.read(cx).icons.get(&key)))
+            .map(|row| icon_key(&row.item).and_then(|key| launcher.icons.get(&key)))
             .collect::<Vec<_>>();
-        let selected = self.launcher.read(cx).selected;
-        let searching = self.launcher.read(cx).searching;
-        let error = self.launcher.read(cx).error.is_some();
-        let status = self.launcher.read(cx).status();
-        let open = self.launcher.read(cx).activated().is_some();
-        let latency = self
-            .launcher
-            .read(cx)
+        let selected = launcher.selected;
+        let searching = launcher.searching;
+        let error = launcher.error.is_some();
+        let status = launcher.status();
+        let open = launcher.activated().is_some();
+        let latency = launcher
             .telemetry
             .last_first_paint()
             .map(|ms| format!("paint {ms:.0} ms"))
             .unwrap_or_else(|| "paint --".to_owned());
-
-        let focus = self.launcher.read(cx).focus.clone();
+        let focus = launcher.focus.clone();
+        let telemetry = Arc::clone(&launcher.telemetry);
+        let backdrop = launcher.backdrop.clone();
+        let scroll = launcher.results_scroll.clone();
         let entity = self.launcher.clone();
-        let telemetry = self.launcher.read(cx).telemetry.clone();
-        let backdrop = self.launcher.read(cx).backdrop.clone();
 
         // The root is deliberately not painted; the panel owns its rounded fill
         // and the transparent window exposes the desktop around its corners.
@@ -1043,9 +1072,18 @@ impl Render for LauncherView {
                     .child(self.search_field(theme, &focus, entity, telemetry))
                     .when(!query_empty, |panel| {
                         panel
-                            .child(
-                                self.result_list(&rows, &icons, selected, theme, searching, error),
-                            )
+                            .child(Self::result_list(
+                                ResultList {
+                                    rows: &rows,
+                                    icons: &icons,
+                                    selected,
+                                    theme,
+                                    searching,
+                                    error,
+                                    scroll: &scroll,
+                                },
+                                cx,
+                            ))
                             .child(Self::status_bar(
                                 status, latency, composing, error, open, theme,
                             ))
@@ -1145,7 +1183,7 @@ impl LauncherView {
         theme: Theme,
     ) -> impl IntoElement {
         let left = if composing {
-            "IME composing".to_owned()
+            "Composing…".to_owned()
         } else {
             status
         };
@@ -1187,37 +1225,53 @@ impl LauncherView {
             )
     }
 
+    /// Selects a row with the pointer and opens it, exactly as <kbd>Enter</kbd>
+    /// would, so a click and a keypress cannot disagree about what "open" does.
+    fn on_row_click(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.launcher.update(cx, |launcher, _| {
+            if index < launcher.rows.len() {
+                launcher.selected = index;
+            }
+        });
+        self.on_activate(&Activate, window, cx);
+    }
+
     /// The scrollable result rows.
-    fn result_list(
-        &mut self,
-        rows: &[RankedItem],
-        icons: &[Option<Arc<RenderImage>>],
-        selected: usize,
-        theme: Theme,
-        searching: bool,
-        error: bool,
-    ) -> impl IntoElement {
+    ///
+    /// Every child of the list is a row, in row order, so a row's index is also
+    /// its child index — which is what [`ScrollHandle::scroll_to_item`] counts
+    /// in. A wrapper or a header inserted between them would make keyboard
+    /// scrolling reveal the wrong row.
+    fn result_list(list: ResultList<'_>, cx: &mut Context<Self>) -> impl IntoElement {
+        let ResultList {
+            rows,
+            icons,
+            selected,
+            theme,
+            searching,
+            error,
+            scroll,
+        } = list;
         // A stable id, which is also what makes the element *stateful* — and
         // `overflow_y_scroll` lives on `StatefulInteractiveElement`, so the id
-        // is required rather than decorative. The useful side effect is that
-        // the scroll offset survives a keystroke, so refining a long list does
-        // not throw the user back to the top.
+        // is required rather than decorative.
         let list = div()
             .id(SharedString::from("orca-results"))
             .flex()
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
+            .track_scroll(scroll)
             .px_3()
             .py_2();
 
         if rows.is_empty() {
             let message = if error {
-                "collection failed"
+                "Results unavailable"
             } else if searching {
-                "searching..."
+                SEARCHING
             } else {
-                "no matches"
+                NO_MATCHES
             };
             return list.child(
                 div()
@@ -1239,14 +1293,25 @@ impl LauncherView {
             // a right-aligned column needs no such reservation, which is where
             // the ~44px it was holding went — straight into the title.
             div()
+                .id(("orca-result", index))
                 .flex()
                 .flex_row()
+                .flex_shrink_0()
                 .items_center()
                 .gap_3()
                 .px_4()
                 .h(px(ROW_HEIGHT))
                 .rounded(px(10.))
+                .cursor_pointer()
                 .when(is_selected, |style| style.bg(theme.selection))
+                // Hover is fainter than selection, so the pointer resting over
+                // the list never reads as a second selected row.
+                .when(!is_selected, |style| {
+                    style.hover(move |style| style.bg(theme.hover))
+                })
+                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                    view.on_row_click(index, window, cx);
+                }))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -1325,11 +1390,7 @@ pub fn request_search(launcher: &mut Launcher, cx: &mut Context<Launcher>) {
     let query = launcher.query.clone();
     let generation = launcher.generation.next();
     if query.is_empty() {
-        launcher.rows.clear();
-        launcher.matches = 0;
-        launcher.searching = false;
-        launcher.error = None;
-        launcher.selected = 0;
+        launcher.show_results(Vec::new(), 0, None);
         cx.notify();
         return;
     }
@@ -1348,11 +1409,7 @@ pub fn request_search(launcher: &mut Launcher, cx: &mut Context<Launcher>) {
             if outcome.generation != launcher.generation.get() {
                 return;
             }
-            launcher.rows = outcome.rows;
-            launcher.matches = outcome.matches;
-            launcher.error = outcome.error;
-            launcher.searching = false;
-            launcher.clamp_selection();
+            launcher.show_results(outcome.rows, outcome.matches, outcome.error);
             request_icons(launcher, cx);
             cx.notify();
         });

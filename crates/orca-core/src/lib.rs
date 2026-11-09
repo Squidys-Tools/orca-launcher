@@ -93,4 +93,4 @@ pub use providers::{
     evaluate, format_value, CalculatorProvider, ProviderError, QueryProvider, QueryProviders,
     RawResult, ResultProvider,
 };
-pub use rank::{rank, rank_at, rank_with, RankedItem};
+pub use rank::{rank, rank_at, rank_top, rank_with, RankedItem, TopRanked};

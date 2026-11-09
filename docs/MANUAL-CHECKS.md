@@ -382,7 +382,7 @@ structural property (there is no code path from `render` to the filesystem) but
       takes focus in well under a second as a compact search bar. No catalogue
       search should run until the query is non-empty.
 - [ ] Type a query. **Expected:** the panel expands immediately, the status line
-      reads `searching...`, and rows appear afterwards. If the popup is blank or
+      reads `Searching…`, and rows appear afterwards. If the popup is blank or
       unresponsive until results land, something is on the UI thread that should
       not be — check `request_search` in `ui.rs`.
 - [ ] On a machine with a large `C:\Users`, time hotkey → first painted pixel.
@@ -418,7 +418,25 @@ been judged by a person looking at a list.
 - [ ] Type a query matching nothing. Is the list empty, rather than everything
       shown faintly?
 - [ ] Check the status line wording: `3 matches` vs `50 of 400 matches` should
-      read differently, and `searching...` should not stick once results land.
+      read differently, and `Searching…` should not stick once results land.
+
+### Result list: keyboard, scrolling, and pointer
+
+Only about seven of the 50 rows fit in the panel. The selection scrolls through
+a `ScrollHandle`, which no unit test can see.
+
+- [ ] Type a one-letter query with many matches and hold <kbd>Down</kbd>.
+      **Expected:** the highlighted row never leaves the panel; the list scrolls
+      just enough to keep it visible, and <kbd>Up</kbd> scrolls back.
+- [ ] Arrow down a few rows, then type another character. **Expected:** the top
+      row is selected again and the list is scrolled to the top, so
+      <kbd>Enter</kbd> opens the best match for what you typed.
+- [ ] Move the pointer over a row that is not selected. **Expected:** a faint
+      highlight, clearly lighter than the selected row's.
+- [ ] Click a row. **Expected:** it opens exactly as <kbd>Enter</kbd> would, and
+      the popup hides.
+- [ ] Scroll with the mouse wheel. **Expected:** the list scrolls freely and is
+      not snapped back to the selection until a key moves it.
 
 ## 7. Display, DPI, and multiple monitors
 

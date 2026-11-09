@@ -17,8 +17,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use orca_core::providers::{Alias, CommandProvider, ResultProvider};
 use orca_core::store::{LaunchRecord, MemoryUsageStore, UsageStore, UsageStoreExt};
 use orca_core::{
-    classify, match_score, rank_at, Frecency, LaunchTarget, RankingPolicy, ResultItem, Source,
-    Timestamp,
+    classify, match_score, rank_at, rank_top, Frecency, LaunchTarget, RankingPolicy, ResultItem,
+    Source, Timestamp,
 };
 
 const NOW: Timestamp = Timestamp::from_unix_seconds(1_700_000_000);
@@ -163,6 +163,22 @@ fn bench_rank(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("typed", size), &items, |b, items| {
             b.iter(|| {
                 std::hint::black_box(rank_at(RankingPolicy::DEFAULT, TYPED_QUERY, NOW, items)).len()
+            })
+        });
+        // What the launcher actually runs per keystroke: the 50 rows it shows,
+        // plus the full match count. Compare against `typed`, which is what the
+        // launcher ran before it stopped ranking rows it would never draw.
+        group.bench_with_input(BenchmarkId::new("typed_top50", size), &items, |b, items| {
+            b.iter(|| {
+                std::hint::black_box(rank_top(
+                    &RankingPolicy::DEFAULT,
+                    TYPED_QUERY,
+                    NOW,
+                    items,
+                    50,
+                ))
+                .rows
+                .len()
             })
         });
         // A long query against short titles is the worst case for the length

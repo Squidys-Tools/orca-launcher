@@ -45,7 +45,7 @@
 use std::time::Duration;
 
 use crate::frecency::{Frecency, Timestamp, DEFAULT_HALF_LIFE};
-use crate::matching::{match_quality_with_subtitle, MatchKind, MatchQuality};
+use crate::matching::{MatchKind, MatchQuality, Matcher};
 use crate::model::Source;
 
 /// Share of the final score driven by the query match.
@@ -292,17 +292,28 @@ impl RankingPolicy {
     /// which query is "too short to fuzz".
     #[must_use]
     pub fn match_quality(&self, query: &str, title: &str, subtitle: Option<&str>) -> MatchQuality {
-        let quality = match_quality_with_subtitle(query, title, subtitle);
+        self.match_quality_with(&mut Matcher::new(query), title, subtitle)
+    }
+
+    /// [`RankingPolicy::match_quality`] with a query folded once by the caller,
+    /// which is how the ranker scores a whole catalogue.
+    pub(crate) fn match_quality_with(
+        &self,
+        matcher: &mut Matcher,
+        title: &str,
+        subtitle: Option<&str>,
+    ) -> MatchQuality {
+        let quality = matcher.quality_with_subtitle(title, subtitle);
         if quality.kind != MatchKind::Fuzzy {
             return quality;
         }
         // `0` is a real setting and means "no typo tolerance at all", so the
         // enabled test cannot be `min_fuzzy_length > 0` — that would make 0 mean
-        // the opposite of what it says. The query's length is counted the same
-        // way the matcher counts it: after trimming, case folding, and
-        // whitespace removal. Counting raw bytes would let a one-character CJK
-        // query look "long enough" and let the fuzzy tier through.
-        let enabled = self.min_fuzzy_length >= 1 && fold_len(query) >= self.min_fuzzy_length;
+        // the opposite of what it says. The query's length is the matcher's own
+        // count: after trimming, case folding, and whitespace removal. Counting
+        // raw bytes would let a one-character CJK query look "long enough" and
+        // let the fuzzy tier through.
+        let enabled = self.min_fuzzy_length >= 1 && matcher.query_len() >= self.min_fuzzy_length;
         if enabled {
             quality
         } else {
@@ -339,13 +350,6 @@ impl Default for RankingPolicy {
     fn default() -> Self {
         RankingPolicy::DEFAULT
     }
-}
-
-/// Length of a query as the matcher sees it, after folding and whitespace
-/// removal. Kept next to [`RankingPolicy::match_quality`] so the two cannot
-/// count differently.
-fn fold_len(query: &str) -> usize {
-    crate::text::fold_query(query).len()
 }
 
 #[cfg(test)]

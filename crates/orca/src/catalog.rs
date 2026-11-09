@@ -27,6 +27,7 @@
 //! first collection become visible after the launcher restarts; there is no
 //! watcher or persistent index.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,7 +37,9 @@ use orca_core::providers::{
     DirectoryLister, FileSearchProvider, ProviderError, ProviderSet, QueryProviders, RawResult,
 };
 use orca_core::store::{UsageStore, UsageStoreExt};
-use orca_core::{rank_with, Frecency, RankedItem, RankingPolicy, ResultItem, Source, Timestamp};
+use orca_core::{
+    rank_top, Frecency, RankedItem, RankingPolicy, ResultItem, Source, Timestamp, TopRanked,
+};
 
 /// The candidate set plus the file-walk configuration.
 ///
@@ -75,19 +78,24 @@ impl Catalog {
             .frecency_map()
             .map_err(|error| ProviderError::History(Box::new(error)))?;
 
+        // A set of seen ids rather than a scan of `merged`: the scan made the
+        // cold collection quadratic, and with the default 2,000-entry file walk
+        // on top of the installed apps that is millions of string compares on
+        // the path that delays the first results.
+        let mut seen: HashSet<String> = HashSet::new();
         let mut merged: Vec<RawResult> = Vec::new();
-        for candidate in self.providers.collect_all()? {
-            if !merged.iter().any(|existing| existing.id == candidate.id) {
-                merged.push(candidate);
+        let mut keep = |raw: RawResult| {
+            if seen.insert(raw.id.clone()) {
+                merged.push(raw);
             }
+        };
+        for candidate in self.providers.collect_all()? {
+            keep(candidate);
         }
 
         if self.files.enabled {
             for item in FileSearchProvider::from_config(lister, &self.files).walk()? {
-                let raw = to_raw(item);
-                if !merged.iter().any(|existing| existing.id == raw.id) {
-                    merged.push(raw);
-                }
+                keep(to_raw(item));
             }
         }
 
@@ -145,30 +153,18 @@ pub fn now() -> Timestamp {
 /// Returns the total match count as well as the rows, because "there are 400
 /// matches and you are seeing 50" and "there are 50 matches" are different
 /// situations and the status line is the only place that can say which.
+///
+/// Only the rows that will be drawn are sorted and cloned; see
+/// [`orca_core::rank_top`].
 #[must_use]
-pub fn rank(
+pub fn rank<'a>(
     policy: &RankingPolicy,
     query: &str,
     at: Timestamp,
-    items: &[ResultItem],
+    items: impl IntoIterator<Item = &'a ResultItem>,
     max_results: usize,
-) -> RankedRows {
-    let ranked = rank_with(policy, query, at, items.iter());
-    let matches = ranked.len();
-    let rows = ranked
-        .into_iter()
-        .take(max_results.max(1))
-        .collect::<Vec<_>>();
-    RankedRows { rows, matches }
-}
-
-/// A ranked answer: the rows to draw, and how many there would have been.
-#[derive(Debug, Clone, Default)]
-pub struct RankedRows {
-    /// The rows to draw.
-    pub rows: Vec<RankedItem>,
-    /// The full match count, before truncation.
-    pub matches: usize,
+) -> TopRanked {
+    rank_top(policy, query, at, items, max_results.max(1))
 }
 
 /// A monotonically increasing token identifying one search request.
@@ -282,11 +278,11 @@ impl Engine {
     /// in so it competes with everything else on the same scale rather than being
     /// pasted above or below the list.
     ///
-    /// The merge therefore only touches the catalogue when something actually
-    /// answered. Cloning several thousand `ResultItem`s to discover that the query
-    /// is `notepad` would put a per-keystroke allocation on the one path this
-    /// project is explicit must stay fast — `docs/ARCHITECTURE.md`, "Fast to
-    /// open, or it is just a menu".
+    /// The merge chains the answers onto the cached catalogue rather than
+    /// copying it. Cloning several thousand `ResultItem`s to rank one extra row
+    /// would put a per-keystroke allocation on the one path this project is
+    /// explicit must stay fast — `docs/ARCHITECTURE.md`, "Fast to open, or it is
+    /// just a menu".
     pub fn search(&self, query: &str, generation: u64) -> Outcome {
         let (items, error) = match self.cached() {
             Some(items) => (items, None),
@@ -306,15 +302,13 @@ impl Engine {
             .map(|raw| raw.into_item(Frecency::NEVER))
             .collect::<Vec<_>>();
 
-        let combined = if extra.is_empty() {
-            None
-        } else {
-            Some(items.iter().cloned().chain(extra).collect::<Vec<_>>())
-        };
-        let candidates: &[ResultItem] = combined.as_deref().unwrap_or_else(|| items.as_slice());
-
-        let RankedRows { rows, matches } =
-            rank(&self.policy, query, now(), candidates, self.max_results);
+        let TopRanked { rows, matches } = rank(
+            &self.policy,
+            query,
+            now(),
+            items.iter().chain(&extra),
+            self.max_results,
+        );
         Outcome {
             generation,
             rows,
@@ -962,11 +956,10 @@ mod tests {
             QueryProviders::new().with("calculator", CalculatorProvider),
         );
 
-        // Populate the cache, then search something the seam declines. If the
-        // merge cloned unconditionally this would still pass, so the assertion
-        // that matters is the one above it in
-        // `an_engine_collects_once_and_then_answers_from_the_cache` plus the
-        // shape of the code: no `extra`, no clone.
+        // Populate the cache, then search something the seam declines. The
+        // no-copy property itself is asserted by
+        // `an_engine_collects_once_and_then_answers_from_the_cache`, which checks
+        // the cache is still the same allocation after searching.
         let outcome = engine.search("note", 1);
         assert_eq!(outcome.rows.len(), 1);
 
@@ -1005,8 +998,8 @@ mod tests {
 
     /// The merge with a non-empty catalogue: the realistic path, where the
     /// answer is not the only candidate and has to survive ranking alongside
-    /// everything else. This is the branch that copies the catalogue, so it is
-    /// the one a no-clone refactor would break.
+    /// everything else. The answer is chained onto the catalogue rather than
+    /// merged into a copy, so this is the test that proves the chain is ranked.
     #[test]
     fn an_expression_query_answers_alongside_a_real_catalogue() {
         let providers = ProviderSet::new().with(

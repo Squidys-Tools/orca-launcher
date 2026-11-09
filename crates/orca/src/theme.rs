@@ -68,6 +68,9 @@ pub struct Theme {
     pub border: Rgba,
     /// The selected row's fill.
     pub selection: Rgba,
+    /// A row under the pointer. Half the selection's weight, so hovering never
+    /// looks like a second selection.
+    pub hover: Rgba,
     /// Primary text.
     pub text: Rgba,
     /// Secondary text: the per-row source name, the search placeholder, the
@@ -86,6 +89,7 @@ impl Theme {
         surface: rgba_alpha(0xffffff, 0.07),
         border: rgba_alpha(0xffffff, 0.11),
         selection: rgba_alpha(0xffffff, 0.06),
+        hover: rgba_alpha(0xffffff, 0.03),
         text: rgba(0xf6f6f8),
         dim: rgba(0xececf1),
         accent: rgba(0xe3efff),
@@ -98,6 +102,7 @@ impl Theme {
         surface: rgba_alpha(0x000000, 0.05),
         border: rgba_alpha(0x000000, 0.11),
         selection: rgba_alpha(0x000000, 0.07),
+        hover: rgba_alpha(0x000000, 0.035),
         text: rgba(0x16161a),
         dim: rgba(0x2c2c34),
         accent: rgba(0x082b5a),
@@ -261,6 +266,8 @@ mod tests {
                 ("accent on panel", theme.accent, rgba_alpha(0x000000, 0.0)),
                 ("text on selection", theme.on_selection, theme.selection),
                 ("dim on selection", theme.dim, theme.selection),
+                ("text on hover", theme.text, theme.hover),
+                ("dim on hover", theme.dim, theme.hover),
             ] {
                 let ratio = worst_contrast(theme, foreground, fill);
                 assert!(
@@ -284,6 +291,20 @@ mod tests {
                 theme.background.a > 0.5,
                 "{name}: panel tint is too transparent (alpha {})",
                 theme.background.a
+            );
+        }
+    }
+
+    #[test]
+    fn hover_is_fainter_than_selection() {
+        // A pointer resting over the list must not look like a second selected
+        // row, or the keyboard selection becomes ambiguous.
+        for (name, theme) in [("dark", Theme::DARK), ("light", Theme::LIGHT)] {
+            assert!(
+                theme.hover.a > 0.0 && theme.hover.a < theme.selection.a,
+                "{name}: hover alpha {} must sit between 0 and selection {}",
+                theme.hover.a,
+                theme.selection.a
             );
         }
     }
