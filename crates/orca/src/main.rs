@@ -469,9 +469,10 @@ fn show(launcher: &Entity<Launcher>, telemetry: &Arc<Telemetry>, cx: &mut AsyncA
     let existing = cx.update(|app| {
         let focus = launcher.read(app).focus.clone();
         launcher.update(app, |launcher, cx| {
+            // The query is empty after `reset`, so this clears the rows and the
+            // selection rather than starting a search.
             launcher.reset();
             ui::request_search(launcher, cx);
-            launcher.clamp_selection();
         });
         // `WindowHandle` is `Copy`, so the handle is read by value out of the
         // read borrow rather than cloned.

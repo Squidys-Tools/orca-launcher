@@ -18,7 +18,7 @@
 //!   what makes a keypress not reshuffle rows underneath the user's cursor.
 
 use crate::frecency::Timestamp;
-use crate::matching::MatchKind;
+use crate::matching::{MatchKind, Matcher};
 use crate::model::ResultItem;
 use crate::policy::RankingPolicy;
 
@@ -69,63 +69,130 @@ pub fn rank_with<'a>(
     now: Timestamp,
     items: impl IntoIterator<Item = &'a ResultItem>,
 ) -> Vec<RankedItem> {
-    let mut ranked: Vec<RankedItem> = items
-        .into_iter()
-        .filter_map(|item| {
-            // `keywords` is matched alongside the subtitle, and is where a file's full
-            // path lives: searchable without being rendered. Concatenated rather
-            // than scored separately so it lands in the same tiers at the same
-            // discount — a path fragment is a weaker signal than a title, and
-            // there is no reason to invent a fourth weighting for it.
-            let searchable = match (&item.subtitle, &item.keywords) {
-                (Some(subtitle), Some(keywords)) => Some(format!("{subtitle} {keywords}")),
-                (None, Some(keywords)) => Some(keywords.clone()),
-                (Some(subtitle), None) => Some(subtitle.clone()),
-                (None, None) => None,
-            };
-            let quality = policy.match_quality(query, &item.title, searchable.as_deref());
-            if quality.kind == MatchKind::None {
-                return None;
+    rank_top(policy, query, now, items, usize::MAX).rows
+}
+
+/// The best `limit` rows of a ranking, and how many candidates matched at all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TopRanked {
+    /// At most `limit` rows, in [`rank_with`] order.
+    pub rows: Vec<RankedItem>,
+    /// Every candidate that matched, before the limit. "50 of 400" and "50"
+    /// are different answers, and only this count can tell them apart.
+    pub matches: usize,
+}
+
+/// [`rank_with`], keeping only the best `limit` rows.
+///
+/// This is the keystroke path. The UI shows 50 rows out of thousands of
+/// candidates, and a one-letter query matches most of them, so ranking
+/// everything and truncating after meant cloning and fully sorting thousands
+/// of items to draw fifty. Here candidates are scored by reference, the best
+/// `limit` are selected in linear time, and only those are sorted and cloned.
+/// The rows are exactly the first `limit` rows of [`rank_with`], because the
+/// comparator is a total order.
+#[must_use]
+pub fn rank_top<'a>(
+    policy: &RankingPolicy,
+    query: &str,
+    now: Timestamp,
+    items: impl IntoIterator<Item = &'a ResultItem>,
+    limit: usize,
+) -> TopRanked {
+    let mut matcher = Matcher::new(query);
+    // Reused across candidates so joining subtitle and keywords costs no
+    // allocation once it has grown to the longest pair.
+    let mut joined = String::new();
+    let mut scored: Vec<Scored<'a>> = Vec::new();
+
+    for item in items {
+        // `keywords` is matched alongside the subtitle, and is where a file's full
+        // path lives: searchable without being rendered. Concatenated rather
+        // than scored separately so it lands in the same tiers at the same
+        // discount — a path fragment is a weaker signal than a title, and
+        // there is no reason to invent a fourth weighting for it.
+        let searchable = match (&item.subtitle, &item.keywords) {
+            (Some(subtitle), Some(keywords)) => {
+                joined.clear();
+                joined.push_str(subtitle);
+                joined.push(' ');
+                joined.push_str(keywords);
+                Some(joined.as_str())
             }
-            let score = policy.score(quality, item.source, item.score, item.frecency, now);
-            if score < policy.min_score() {
-                return None;
-            }
-            Some(RankedItem {
-                item: item.clone(),
-                score,
-                quality,
+            (None, Some(keywords)) => Some(keywords.as_str()),
+            (Some(subtitle), None) => Some(subtitle.as_str()),
+            (None, None) => None,
+        };
+        let quality = policy.match_quality_with(&mut matcher, &item.title, searchable);
+        if quality.kind == MatchKind::None {
+            continue;
+        }
+        let score = policy.score(quality, item.source, item.score, item.frecency, now);
+        if score < policy.min_score() {
+            continue;
+        }
+        scored.push(Scored {
+            item,
+            score,
+            quality,
+        });
+    }
+
+    let matches = scored.len();
+    let order = |a: &Scored<'_>, b: &Scored<'_>| compare(policy, a, b);
+    if limit == 0 {
+        scored.clear();
+    } else if limit < scored.len() {
+        scored.select_nth_unstable_by(limit - 1, order);
+        scored.truncate(limit);
+    }
+    scored.sort_by(order);
+
+    TopRanked {
+        rows: scored
+            .into_iter()
+            .map(|scored| RankedItem {
+                item: scored.item.clone(),
+                score: scored.score,
+                quality: scored.quality,
             })
+            .collect(),
+        matches,
+    }
+}
+
+/// A candidate that survived matching, borrowed until it makes the cut.
+struct Scored<'a> {
+    item: &'a ResultItem,
+    score: f64,
+    quality: crate::matching::MatchQuality,
+}
+
+/// The documented row order; see [`rank_with`].
+fn compare(policy: &RankingPolicy, a: &Scored<'_>, b: &Scored<'_>) -> std::cmp::Ordering {
+    // `partial_cmp` is total on our own output because every score went
+    // through `clamp01`, which cannot produce NaN. The `unwrap_or` is a
+    // belt-and-braces fallback, not a live branch: it is the difference
+    // between "sort is slightly wrong" and "sort panics".
+    b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| b.quality.kind.cmp(&a.quality.kind))
+        .then_with(|| {
+            b.quality
+                .score
+                .partial_cmp(&a.quality.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .collect();
-
-    ranked.sort_by(|a, b| {
-        // `partial_cmp` is total on our own output because every score went
-        // through `clamp01`, which cannot produce NaN. The `unwrap_or` is a
-        // belt-and-braces fallback, not a live branch: it is the difference
-        // between "sort is slightly wrong" and "sort panics".
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.quality.kind.cmp(&a.quality.kind))
-            .then_with(|| {
-                b.quality
-                    .score
-                    .partial_cmp(&a.quality.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                policy
-                    .sources()
-                    .get(b.item.source)
-                    .partial_cmp(&policy.sources().get(a.item.source))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.item.title.cmp(&b.item.title))
-            .then_with(|| a.item.id.cmp(&b.item.id))
-    });
-
-    ranked
+        .then_with(|| {
+            policy
+                .sources()
+                .get(b.item.source)
+                .partial_cmp(&policy.sources().get(a.item.source))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.item.title.cmp(&b.item.title))
+        .then_with(|| a.item.id.cmp(&b.item.id))
 }
 
 /// Convenience alias for [`rank_with`], spelled the way it reads at a call
@@ -479,6 +546,45 @@ mod tests {
         assert_eq!(ranked[0].quality.kind, MatchKind::Prefix);
         assert!((ranked[0].quality.score - PREFIX_SCORE).abs() < 1e-12);
         assert_eq!(ranked[1].quality.kind, MatchKind::WordBoundary);
+    }
+
+    #[test]
+    fn the_top_rows_are_exactly_the_leading_rows_of_the_full_ranking() {
+        // `rank_top` selects before it sorts. That is only an optimisation if it
+        // can never change what the user sees, so every limit — including 0,
+        // 1, a tie-heavy middle, and more than there are — must reproduce the
+        // full ranking's prefix and report the full match count.
+        let items: Vec<ResultItem> = (0..60)
+            .map(|index| {
+                let title = match index % 4 {
+                    0 => format!("Note {index}"),
+                    1 => format!("Notepad {}", index % 7),
+                    2 => format!("text note {index}"),
+                    _ => format!("unrelated {index}"),
+                };
+                item(&format!("app:{index:02}"), &title)
+                    .with_subtitle(format!(r"C:\Notes\{}", index % 5))
+                    .with_keywords(format!(r"C:\Notes\{}\{title}", index % 5))
+                    .with_score((index % 3) as f64 / 3.0)
+                    .with_frecency(Frecency::new(
+                        (index % 5) as u32,
+                        Some(NOW.saturating_add_secs(-(index as i64) * HOUR)),
+                    ))
+            })
+            .collect();
+
+        for query in ["", "n", "note", "notes", "ntp"] {
+            let full = rank_default(query, &items);
+            for limit in [0, 1, 5, 17, full.len(), full.len() + 10] {
+                let top = rank_top(&RankingPolicy::DEFAULT, query, NOW, &items, limit);
+                assert_eq!(top.matches, full.len(), "{query:?} limit {limit}");
+                assert_eq!(
+                    top.rows,
+                    full[..limit.min(full.len())],
+                    "{query:?} limit {limit}"
+                );
+            }
+        }
     }
 
     #[test]

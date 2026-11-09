@@ -38,8 +38,34 @@
 /// lowercased string is wrong for every non-ASCII input, and wrong *silently*,
 /// because a misaligned slice still compares equal to nothing and the code just
 /// reports "no match".
+#[cfg(test)]
 pub(crate) fn fold(value: &str) -> Vec<char> {
-    value.trim().to_lowercase().chars().collect()
+    let mut out = Vec::new();
+    fold_into(value, &mut out);
+    out
+}
+
+/// [`fold`], into a buffer the caller reuses.
+///
+/// The ranker folds two strings per candidate per keystroke, so allocating a
+/// `String` and a `Vec<char>` for each was most of what a keystroke cost. ASCII
+/// takes a direct path: for ASCII input `to_ascii_lowercase` and
+/// `to_lowercase` are the same mapping, so the two paths cannot disagree, and
+/// most titles and paths are ASCII. Anything else goes through `to_lowercase`,
+/// whose context-sensitive rules (the final sigma) a per-`char` loop would get
+/// wrong.
+pub(crate) fn fold_into(value: &str, out: &mut Vec<char>) {
+    out.clear();
+    let trimmed = value.trim();
+    if trimmed.is_ascii() {
+        out.extend(
+            trimmed
+                .bytes()
+                .map(|byte| char::from(byte.to_ascii_lowercase())),
+        );
+    } else {
+        out.extend(trimmed.to_lowercase().chars());
+    }
 }
 
 /// Folds a *query*: as [`fold`], then drops every whitespace character.
@@ -113,6 +139,27 @@ mod tests {
         assert_eq!(fold("ÀÉÎ"), "àéî".chars().collect::<Vec<_>>());
         // Simple, not full: a full case fold would turn `ß` into `ss`.
         assert_eq!(fold("ß"), "ß".chars().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_ascii_fast_path_agrees_with_full_lowercasing() {
+        // The fast path is only sound if it is indistinguishable from the slow
+        // one. Mixed, padded, punctuated, and non-ASCII inputs, including the
+        // final sigma that a per-char lowercase would get wrong.
+        let mut buffer = vec!['x'; 8];
+        for value in [
+            "",
+            "  Notepad.EXE  ",
+            r"C:\Users\Chris\Downloads\Report-2026.XLSX",
+            "MiXeD_case 42",
+            "Café Notes",
+            "ΟΔΟΣ",
+            " 日本語 ",
+        ] {
+            fold_into(value, &mut buffer);
+            let expected: Vec<char> = value.trim().to_lowercase().chars().collect();
+            assert_eq!(buffer, expected, "{value:?}");
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@
 //! allocation beyond the two `Vec<char>` needed to make case folding
 //! length-safe.
 
-use crate::text::{fold, fold_query, is_word_char};
+use crate::text::{fold_into, fold_query, is_word_char};
 
 /// The candidate equals the query.
 pub const EXACT_SCORE: f64 = 1.00;
@@ -149,36 +149,80 @@ pub fn match_score(query: &str, candidate: &str) -> f64 {
 /// help once the user has actually typed something.
 #[must_use]
 pub fn match_score_with_subtitle(query: &str, title: &str, subtitle: Option<&str>) -> f64 {
-    match_quality_with_subtitle(query, title, subtitle).score
+    Matcher::new(query)
+        .quality_with_subtitle(title, subtitle)
+        .score
 }
 
 /// Like [`match_score_with_subtitle`], but keeps the tier as well as the score.
 ///
-/// Crate-internal: the tier is only meaningful to [`crate::policy`], which is
-/// the one caller that needs to apply the min-fuzzy-length gate without losing
-/// the score.
+/// Test shorthand for [`Matcher::quality_with_subtitle`]; real callers hold a
+/// `Matcher` so the query is folded once per search, not once per candidate.
+#[cfg(test)]
 pub(crate) fn match_quality_with_subtitle(
     query: &str,
     title: &str,
     subtitle: Option<&str>,
 ) -> MatchQuality {
-    let from_title = analyze(query, title, 1.0);
-    let from_subtitle = analyze_subtitle(query, subtitle);
-    if from_subtitle.score > from_title.score {
-        from_subtitle
-    } else {
-        from_title
-    }
+    Matcher::new(query).quality_with_subtitle(title, subtitle)
 }
 
-fn analyze_subtitle(query: &str, subtitle: Option<&str>) -> MatchQuality {
-    let Some(subtitle) = subtitle.filter(|value| !value.trim().is_empty()) else {
-        return MatchQuality {
-            kind: MatchKind::None,
-            score: 0.0,
+const NO_MATCH: MatchQuality = MatchQuality {
+    kind: MatchKind::None,
+    score: 0.0,
+};
+
+/// One query, folded once, matched against many candidates.
+///
+/// The free functions above fold the query on every call, which is right for
+/// one comparison and wasteful for a catalogue: ranking used to fold the same
+/// query twice per candidate and allocate a fresh buffer for every candidate
+/// it folded. A `Matcher` folds the query in [`Matcher::new`] and reuses one
+/// haystack buffer, so scoring a catalogue allocates nothing per candidate.
+/// The free functions are built on it, so there is still one matching path.
+pub(crate) struct Matcher {
+    needle: Vec<char>,
+    haystack: Vec<char>,
+}
+
+impl Matcher {
+    pub(crate) fn new(query: &str) -> Matcher {
+        Matcher {
+            needle: fold_query(query),
+            haystack: Vec::new(),
+        }
+    }
+
+    /// The query's length as the matcher counts it: folded, whitespace removed.
+    pub(crate) fn query_len(&self) -> usize {
+        self.needle.len()
+    }
+
+    /// The better of the title match and the discounted subtitle match.
+    ///
+    /// A tie goes to the title, so a subtitle can only win by being strictly
+    /// better.
+    pub(crate) fn quality_with_subtitle(
+        &mut self,
+        title: &str,
+        subtitle: Option<&str>,
+    ) -> MatchQuality {
+        let from_title = self.analyze(title, 1.0);
+        let from_subtitle = match subtitle.filter(|value| !value.trim().is_empty()) {
+            Some(subtitle) => self.analyze(subtitle, SUBTITLE_DISCOUNT),
+            None => NO_MATCH,
         };
-    };
-    analyze(query, subtitle, SUBTITLE_DISCOUNT)
+        if from_subtitle.score > from_title.score {
+            from_subtitle
+        } else {
+            from_title
+        }
+    }
+
+    fn analyze(&mut self, candidate: &str, discount: f64) -> MatchQuality {
+        fold_into(candidate, &mut self.haystack);
+        analyze_folded(&self.needle, &self.haystack, discount)
+    }
 }
 
 /// Classifies a query/candidate pair into a tier, ignoring subtitle matches.
@@ -196,16 +240,15 @@ pub fn classify(query: &str, candidate: &str) -> MatchKind {
 /// than two, which is the only way to guarantee the tiers stay identical
 /// between them.
 fn analyze(query: &str, candidate: &str, discount: f64) -> MatchQuality {
-    let needle = fold_query(query);
-    let haystack = fold(candidate);
+    Matcher::new(query).analyze(candidate, discount)
+}
 
+/// [`analyze`], over a query and candidate that are already folded.
+fn analyze_folded(needle: &[char], haystack: &[char], discount: f64) -> MatchQuality {
     if haystack.is_empty() {
         // An empty candidate can never be a match, not even a browse one: there
         // is no text for the user to have meant.
-        return MatchQuality {
-            kind: MatchKind::None,
-            score: 0.0,
-        };
+        return NO_MATCH;
     }
     if needle.is_empty() {
         return MatchQuality {
@@ -227,7 +270,7 @@ fn analyze(query: &str, candidate: &str, discount: f64) -> MatchQuality {
     if haystack == needle {
         return fixed(MatchKind::Exact, discount);
     }
-    if haystack.starts_with(needle.as_slice()) {
+    if haystack.starts_with(needle) {
         return fixed(MatchKind::Prefix, discount);
     }
 
@@ -239,14 +282,11 @@ fn analyze(query: &str, candidate: &str, discount: f64) -> MatchQuality {
     if substring_at_boundary {
         return fixed(MatchKind::WordBoundary, discount);
     }
-    if haystack
-        .windows(needle.len())
-        .any(|w| w == needle.as_slice())
-    {
+    if haystack.windows(needle.len()).any(|w| w == needle) {
         return fixed(MatchKind::Substring, discount);
     }
 
-    match fuzzy_span(&needle, &haystack) {
+    match fuzzy_span(needle, haystack) {
         Some((first, last)) => {
             // Packing is measured against the range that is *achievable for a
             // fuzzy match*, not against zero. A span of exactly `needle.len()`
